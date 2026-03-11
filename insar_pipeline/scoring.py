@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 
@@ -12,9 +13,16 @@ class ScoreConfig:
     predict_dir: Path
     score_filename: str = "score.npy"
     chunk_size: int = 512
+    metric: Literal["phase_std", "coherence"] = "phase_std"
+    use_zscore: bool = False
 
 
-def calculate_difference(interferogram1: np.ndarray, interferogram2: np.ndarray, chunk_size: int = 1024) -> np.ndarray:
+def calculate_difference(
+    interferogram1: np.ndarray,
+    interferogram2: np.ndarray,
+    chunk_size: int = 1024,
+    metric: str = "phase_std",
+) -> np.ndarray:
     if interferogram1.shape != interferogram2.shape:
         raise ValueError("Both interferograms must have the same shape.")
 
@@ -30,7 +38,10 @@ def calculate_difference(interferogram1: np.ndarray, interferogram2: np.ndarray,
             denominator = chunk1 + chunk2 + 1e-8
             valid_mask = denominator != 0
             diff_chunk = np.full_like(chunk1, np.nan, dtype=np.float32)
-            diff_chunk[valid_mask] = (chunk1[valid_mask] - chunk2[valid_mask]) / denominator[valid_mask]
+            if metric == "coherence":
+                diff_chunk[valid_mask] = (chunk2[valid_mask] - chunk1[valid_mask]) / denominator[valid_mask]
+            else:
+                diff_chunk[valid_mask] = (chunk1[valid_mask] - chunk2[valid_mask]) / denominator[valid_mask]
             difference[i:end_i, j:end_j] = diff_chunk
 
     mask = np.isnan(interferogram1) | np.isnan(interferogram2) | (interferogram1 == 0) | (interferogram2 == 0)
@@ -39,16 +50,34 @@ def calculate_difference(interferogram1: np.ndarray, interferogram2: np.ndarray,
 
 
 def compute_and_save_score(config: ScoreConfig) -> Path:
-    geninue_std = np.load(config.dataset_dir / "geninue_std.npy")
+    genuine_filename = "geninue_std.npy" if config.metric == "phase_std" else "geninue.npy"
+    genuine_data = np.load(config.dataset_dir / genuine_filename)
     future_predictions = np.load(config.predict_dir / "future_predictions.npy")
 
-    if geninue_std.ndim == 3:
-        geninue_std = np.squeeze(geninue_std, axis=-1)
+    if genuine_data.ndim == 3:
+        genuine_data = np.squeeze(genuine_data, axis=-1)
 
-    phase_score = calculate_difference(geninue_std, future_predictions, chunk_size=config.chunk_size)
-    phase_score = np.where(np.isnan(geninue_std), np.nan, np.where(geninue_std == 0, 0, phase_score))
-    phase_score = np.where(np.isnan(future_predictions), np.nan, np.where(future_predictions == 0, 0, phase_score))
+    if config.use_zscore:
+        pred_std_path = config.predict_dir / "future_prediction_std.npy"
+        if not pred_std_path.exists():
+            raise FileNotFoundError("future_prediction_std.npy is required when use_zscore=True")
+        future_pred_std = np.load(pred_std_path)
+        if config.metric == "coherence":
+            zscore = (future_predictions - genuine_data) / (future_pred_std + 1e-8)
+        else:
+            zscore = (genuine_data - future_predictions) / (future_pred_std + 1e-8)
+        score = zscore.astype(np.float32)
+    else:
+        score = calculate_difference(
+            genuine_data,
+            future_predictions,
+            chunk_size=config.chunk_size,
+            metric=config.metric,
+        )
+
+    score = np.where(np.isnan(genuine_data), np.nan, np.where(genuine_data == 0, 0, score))
+    score = np.where(np.isnan(future_predictions), np.nan, np.where(future_predictions == 0, 0, score))
 
     output_path = config.predict_dir / config.score_filename
-    np.save(output_path, phase_score)
+    np.save(output_path, score)
     return output_path
