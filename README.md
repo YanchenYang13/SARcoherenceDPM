@@ -1,25 +1,18 @@
-# SARcoherenceDPM: An Open-Source, Research-Oriented Workflow for Rapid InSAR-Based Damage Proxy Mapping
+# Damage Proxy Mapping with Time-Series Prediction of InSAR Phase Standard Deviation
 
 ## Overview
 
-**SARcoherenceDPM** is an open-source workflow designed to make post-disaster damage assessment more efficient, reproducible, and extensible using multi-temporal **InSAR** observations.
-
-The repository formalizes a full **Damage Proxy Mapping (DPM)** pipeline into a modular codebase for research and operational experimentation, with emphasis on:
-
-- rapid end-to-end execution from cropped interferometric inputs to geocoded damage products,
-- interchangeable modeling paths (RNN and ViT) for temporal prediction under no-disaster assumptions,
-- metric-aware scoring strategies for coherence and phase-derived indicators,
-- and reusable CLI/programmatic interfaces that reduce notebook-only friction.
+This project generates **Damage Proxy Maps (DPMs)** from multi-temporal **InSAR** observations by modeling phase-derived time-series behavior and highlighting post-event anomalies.
 
 At a high level, the workflow:
 
 - builds pixel-wise time series from interferometric products,
-- learns temporal patterns with sequence or matrix-based predictors,
+- learns temporal patterns with an LSTM-based predictor,
 - estimates expected post-event behavior under a no-disaster baseline,
 - compares predicted and observed post-event signals,
 - and exports geocoded outputs for downstream mapping and interpretation.
 
-Compared with earlier notebook-centric workflows, this repository provides a modular Python package, **`insar_pipeline`**, with a step-wise CLI and reusable modules covering the full process:
+Compared with earlier notebook-centric workflows, this repository now provides a modular Python package, **`insar_pipeline`**, with a step-wise CLI and reusable modules covering the full process:
 
 **crop → dataset → train/predict → score → output**
 
