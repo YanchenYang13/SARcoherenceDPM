@@ -18,13 +18,22 @@ def run_full_pipeline(
     model_type: str = "lstm",
     use_timestamp: bool = True,
     use_zscore: bool = False,
+    sequence_length: int | None = None,
+    matrix_size: int | None = None,
 ) -> dict[str, Path]:
     cropped_dir = base_dir / "cropped"
 
     batch_crop_filt_fine_cor(
         CropConfig(base_path=base_dir, geom_reference_path=geom_reference_dir, output_base_path=cropped_dir)
     )
-    dataset_dir = build_and_save_dataset(DatasetConfig(cropped_dir=cropped_dir, output_dir=cropped_dir))
+    dataset_dir = build_and_save_dataset(
+        DatasetConfig(
+            cropped_dir=cropped_dir,
+            output_dir=cropped_dir,
+            sequence_length=sequence_length,
+            matrix_size=matrix_size,
+        )
+    )
     predict_dir = run_training_and_prediction(
         TrainingConfig(
             dataset_dir=dataset_dir,
@@ -61,13 +70,22 @@ def run_full_vit_pipeline(
     geom_reference_dir: Path,
     metric: str = "coherence",
     matrix_mode: str = "similarity",
+    sequence_length: int | None = None,
+    matrix_size: int | None = None,
 ) -> dict[str, Path]:
     cropped_dir = base_dir / "cropped"
 
     batch_crop_filt_fine_cor(
         CropConfig(base_path=base_dir, geom_reference_path=geom_reference_dir, output_base_path=cropped_dir)
     )
-    dataset_dir = build_and_save_dataset(DatasetConfig(cropped_dir=cropped_dir, output_dir=cropped_dir))
+    dataset_dir = build_and_save_dataset(
+        DatasetConfig(
+            cropped_dir=cropped_dir,
+            output_dir=cropped_dir,
+            sequence_length=sequence_length,
+            matrix_size=matrix_size,
+        )
+    )
     predict_dir = run_vit_training_and_prediction(
         ViTConfig(dataset_dir=dataset_dir, output_dir=cropped_dir, metric=metric, matrix_mode=matrix_mode)
     )
