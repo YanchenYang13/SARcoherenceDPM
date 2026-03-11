@@ -172,6 +172,7 @@ def run_step(args: argparse.Namespace) -> None:
 
         default_vit_dataset_dir = args.output_dir / "vit_dataset"
         dataset_dir = args.dataset_dir or (default_vit_dataset_dir if default_vit_dataset_dir.exists() else (args.output_dir / "dataset"))
+        dataset_dir = args.dataset_dir or (args.output_dir / "dataset")
         predict_dir = run_vit_training_and_prediction(
             ViTConfig(
                 dataset_dir=dataset_dir,

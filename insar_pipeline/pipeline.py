@@ -8,6 +8,7 @@ from .output_products import OutputConfig, generate_geocoded_outputs
 from .preprocess import CropConfig, batch_crop_filt_fine_cor
 from .scoring import ScoreConfig, compute_and_save_score
 from .vit_modeling import ViTConfig, ViTDatasetBuildConfig, build_and_save_vit_matrix_dataset, run_vit_training_and_prediction
+from .vit_modeling import ViTConfig, run_vit_training_and_prediction
 
 
 def run_full_pipeline(
@@ -87,6 +88,9 @@ def run_full_vit_pipeline(
     )
     predict_dir = run_vit_training_and_prediction(
         ViTConfig(dataset_dir=vit_dataset_dir, output_dir=cropped_dir, metric=metric, matrix_mode=matrix_mode)
+    dataset_dir = build_and_save_dataset(DatasetConfig(cropped_dir=cropped_dir, output_dir=cropped_dir))
+    predict_dir = run_vit_training_and_prediction(
+        ViTConfig(dataset_dir=dataset_dir, output_dir=cropped_dir, metric=metric, matrix_mode=matrix_mode)
     )
     score_path = compute_and_save_score(ScoreConfig(dataset_dir=dataset_dir, predict_dir=predict_dir, metric=metric))
 
