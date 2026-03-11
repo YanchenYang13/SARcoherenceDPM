@@ -16,6 +16,10 @@ Compared with earlier notebook-centric workflows, this repository now provides a
 
 **crop → dataset → train/predict → score → output**
 
+In addition to the RNN time-series path, the repo now supports a **ViT-based DPM extension** for coherence/phase-std temporal matrix modeling:
+
+**crop → dataset → vit_build_dataset → vit_train_predict → score → output**
+
 <img width="4663" height="4000" alt="2" src="https://github.com/user-attachments/assets/57fdef2f-83dd-42f2-a39d-9332afc91bd9" />
 
 
@@ -101,6 +105,8 @@ Supported execution steps:
 - `score`
 - `output`
 - `full`
+- `vit_build_dataset`
+- `vit_train_predict`
 
 ### End-to-End Orchestration
 
@@ -130,6 +136,7 @@ insar_pipeline/
 ├── coherence.py          # Coherence estimation and mapping utilities
 ├── io_utils.py           # Raster read/write and bbox/index helpers
 ├── modeling.py           # LSTM dataset/model/training/prediction
+├── vit_modeling.py       # ViT temporal-matrix dataset/model/training/prediction
 ├── scoring.py            # Score computation
 └── output_products.py    # Geocoded output generation
 ````
@@ -169,6 +176,28 @@ python -m insar_pipeline.app --step build_dataset \
 python -m insar_pipeline.app --step train_predict \
   --base-dir /data6/WORKDIR/AmatriceSenDT22/merged/interferograms \
   --output-dir /data6/WORKDIR/AmatriceSenDT22/merged/interferograms/cropped
+```
+
+### 3b. Build ViT Temporal-Matrix Dataset
+
+```bash
+python -m insar_pipeline.app --step vit_build_dataset \
+  --base-dir /data6/WORKDIR/AmatriceSenDT22/merged/interferograms \
+  --output-dir /data6/WORKDIR/AmatriceSenDT22/merged/interferograms/cropped \
+  --timeseries-metric coherence \
+  --vit-matrix-mode similarity
+```
+
+### 3c. ViT Train and Predict
+
+```bash
+python -m insar_pipeline.app --step vit_train_predict \
+  --base-dir /data6/WORKDIR/AmatriceSenDT22/merged/interferograms \
+  --output-dir /data6/WORKDIR/AmatriceSenDT22/merged/interferograms/cropped \
+  --timeseries-metric coherence \
+  --vit-matrix-mode similarity \
+  --vit-patch-size 2 \
+  --vit-depth 4
 ```
 
 ### 4. Score
@@ -237,9 +266,83 @@ The modeling module then trains an LSTM baseline and produces:
 
 ### C. Damage Proxy Scoring
 
-The scoring module computes a normalized contrast between observed and predicted post-event maps and writes:
+The scoring module supports two score branches and writes:
+
+#### 1) Normalized-index score (default, `use_zscore=False`)
+
+Let `obs` be the observed post-event map and `pred` be the predicted post-event map.
+
+- **phase_std mode** (`--timeseries-metric phase_std`):
+
+  ```text
+  score = (obs - pred) / (obs + pred + eps)
+  ```
+
+- **coherence mode** (`--timeseries-metric coherence`):
+
+  ```text
+  score = (pred - obs) / (obs + pred + eps)
+  ```
+
+  This is the sign-flipped form of the phase-std formula (numerator order swapped).
+
+#### 2) Z-score branch (`use_zscore=True`)
+
+When z-score mode is enabled, training/prediction switches to distribution prediction
+(mean + standard deviation), and scoring becomes metric-aware:
+
+```text
+phase_std: zscore = (obs - pred_mean) / (pred_std + eps)
+coherence: zscore = (pred_mean - obs) / (pred_std + eps)
+```
+
+In this branch:
+
+- model training applies metric-specific transform before sequence scaling:
+  - coherence: `logit(coherence)`
+  - phase_std: `phase_std -> coherence -> logit(coherence)`
+- prediction outputs `future_predictions.npy` (mean) and `future_prediction_std.npy` (std),
+- scoring loads both files and writes metric-consistent z-score values.
+
+Masking policy:
+
+- if either input pixel is NaN, score is NaN,
+- if either input pixel is 0, score is set to 0.
+
+Artifacts:
 
 * `score.npy`
+
+Optional artifact in z-score branch:
+
+* `future_prediction_std.npy`
+
+---
+
+## New CLI Options for Time-Series and Scoring
+
+The CLI now supports configurable metric/model/time-feature/z-score behavior:
+
+```bash
+python -m insar_pipeline.app --step train_predict \
+  --timeseries-metric phase_std \
+  --ts-model lstm \
+  --use-zscore
+```
+
+Available options:
+
+- `--timeseries-metric {phase_std,coherence}`: choose sequence variable and score formula family.
+- `--ts-model {lstm,gru}`: choose the RNN backbone.
+- `--disable-timestamp`: disable date-derived time features from `dates.pkl`.
+- `--use-zscore`: enable logit + distribution prediction + z-score scoring.
+
+ViT extension options:
+
+- `--vit-matrix-mode {similarity,outer,difference}`: build temporal matrix from per-pixel sequence.
+- `--vit-patch-size`: patch size used by ViT patch embedding.
+- `--vit-hidden-dim`, `--vit-depth`, `--vit-heads`: ViT backbone size.
+- `--vit-diag-mask-ratio`, `--vit-diag-loss-weight`: masked-diagonal self-supervised controls.
 
 ### D. Geospatial Output Generation
 
@@ -321,5 +424,3 @@ If this repository is used in operational or publication-oriented workflows, ple
 ## Related Notes
 
 This repository is intended to support **time-series-based InSAR damage assessment** workflows where post-event anomalies are interpreted relative to an expected no-disaster temporal baseline. It is particularly useful for studies that aim to move beyond simple two-date comparison and toward temporally informed post-event change interpretation.
-
-
