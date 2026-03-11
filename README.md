@@ -27,7 +27,6 @@ In addition to the RNN time-series path, the repo now supports a **ViT-based DPM
 
 **crop → dataset → vit_build_dataset → vit_train_predict → score → output**
 
-<img width="4663" height="4000" alt="2" src="https://github.com/user-attachments/assets/57fdef2f-83dd-42f2-a39d-9332afc91bd9" />
 
 
 ---
