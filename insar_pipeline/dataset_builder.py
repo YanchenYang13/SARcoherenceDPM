@@ -27,10 +27,20 @@ class DatasetConfig:
     std_thresh: float = 1.0
     use_circular_std: bool = True
     persist_computed_cor: bool = False
+    timeseries_length: int | None = None
+
+
+def _parse_pair_dates(date_pair: str) -> tuple[dt.datetime, dt.datetime]:
+    start_str, end_str = date_pair.split("_")
+    return dt.datetime.strptime(start_str, "%Y%m%d"), dt.datetime.strptime(end_str, "%Y%m%d")
 
 
 def _date_to_dt(date_str: str) -> dt.datetime:
-    return dt.datetime.strptime(date_str.split("_")[0], "%Y%m%d")
+    return _parse_pair_dates(date_str)[0]
+
+
+def _pair_sort_key(date_pair: str) -> tuple[dt.datetime, dt.datetime]:
+    return _parse_pair_dates(date_pair)
 
 
 def find_cor_files_sorted(cropped_dir: Path) -> list[tuple[dt.datetime, str, Path]]:
@@ -41,8 +51,80 @@ def find_cor_files_sorted(cropped_dir: Path) -> list[tuple[dt.datetime, str, Pat
             continue
         date_str = m.group(1)
         file_infos.append((_date_to_dt(date_str), date_str, path))
-    return sorted(file_infos, key=lambda x: x[0])
+    return sorted(file_infos, key=lambda x: _pair_sort_key(x[1]))
 
+
+def _select_adjacent_pair_observations(
+    observations: list[tuple[dt.datetime, str, np.ndarray]],
+    event_date: dt.datetime,
+    timeseries_length: int | None = None,
+) -> tuple[list[tuple[dt.datetime, str, np.ndarray]], np.ndarray]:
+    if not observations:
+        raise RuntimeError("No observations found.")
+
+    pair_to_obs = {date_pair: (start_dt, date_pair, arr) for start_dt, date_pair, arr in observations}
+
+    acquisitions = sorted(
+        {
+            acq_dt
+            for _, date_pair, _ in observations
+            for acq_dt in _parse_pair_dates(date_pair)
+        }
+    )
+    pre_event_acqs = [d for d in acquisitions if d < event_date]
+    post_event_acqs = [d for d in acquisitions if d >= event_date]
+
+    if len(pre_event_acqs) < 2:
+        raise RuntimeError("Need at least two pre-event acquisitions to build adjacent-pair time series.")
+    if not post_event_acqs:
+        raise RuntimeError("Need at least one post-event acquisition for genuine target.")
+
+    train_observations: list[tuple[dt.datetime, str, np.ndarray]] = []
+    for i in range(len(pre_event_acqs) - 1):
+        pair = f"{pre_event_acqs[i]:%Y%m%d}_{pre_event_acqs[i + 1]:%Y%m%d}"
+        obs = pair_to_obs.get(pair)
+        if obs is not None:
+            train_observations.append(obs)
+
+    if len(train_observations) < 2:
+        raise RuntimeError(
+            "Found fewer than two adjacent pre-event interferograms. "
+            "Please ensure adjacent *_filt_fine.cor pairs exist after cropping."
+        )
+
+    if timeseries_length is not None:
+        if timeseries_length < 2:
+            raise ValueError("timeseries_length must be >= 2 when provided")
+        if len(train_observations) < timeseries_length:
+            raise RuntimeError(
+                f"Requested timeseries_length={timeseries_length}, but only "
+                f"{len(train_observations)} adjacent pre-event pairs are available."
+            )
+        train_observations = train_observations[-timeseries_length:]
+
+    first_post = post_event_acqs[0]
+    last_pre = pre_event_acqs[-1]
+    genuine_pair = f"{last_pre:%Y%m%d}_{first_post:%Y%m%d}"
+    genuine_obs = pair_to_obs.get(genuine_pair)
+    if genuine_obs is None:
+        # Fallback: pick earliest pair that crosses from pre-event to post-event.
+        crossing = []
+        for _, date_pair, arr in observations:
+            s, e = _parse_pair_dates(date_pair)
+            if s < event_date <= e:
+                crossing.append(((s, e), arr))
+        if not crossing:
+            raise RuntimeError(
+                "No crossing interferogram found for genuine target. "
+                "Need at least one pair with start<event_date<=end."
+            )
+        crossing.sort(key=lambda x: x[0])
+        genuine_data = crossing[0][1]
+    else:
+        genuine_data = genuine_obs[2]
+
+    train_observations.sort(key=lambda x: _pair_sort_key(x[1]))
+    return train_observations, genuine_data
 
 
 def _find_cropped_int(cropped_dir: Path, date_pair: str) -> Path | None:
@@ -54,6 +136,7 @@ def _find_cropped_int(cropped_dir: Path, date_pair: str) -> Path | None:
         if c.exists():
             return c
     return None
+
 
 def collect_pair_observations(config: DatasetConfig) -> list[tuple[dt.datetime, str, np.ndarray]]:
     """Collect per-pair coherence observations.
@@ -107,7 +190,7 @@ def collect_pair_observations(config: DatasetConfig) -> list[tuple[dt.datetime, 
 
         observations.append((start_dt, p.date_pair, coh.astype(np.float32)))
 
-    return sorted(observations, key=lambda x: x[0])
+    return sorted(observations, key=lambda x: _pair_sort_key(x[1]))
 
 
 def build_insar_timeseries_from_observations(
@@ -168,10 +251,11 @@ def save_dataset(output_subfolder: Path, timeseries: np.ndarray, dates: list[str
 
 def build_and_save_dataset(config: DatasetConfig) -> Path:
     observations = collect_pair_observations(config)
-    train_observations = [obs for obs in observations if obs[0] < config.event_date]
+    train_observations, geninue_data = _select_adjacent_pair_observations(
+        observations, config.event_date, config.timeseries_length
+    )
 
     timeseries, dates = build_insar_timeseries_from_observations(train_observations)
-    geninue_data = observations[-1][2]
 
     output_subfolder = config.output_dir / "dataset"
     save_dataset(output_subfolder, timeseries, dates, geninue_data)

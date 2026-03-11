@@ -38,6 +38,7 @@ def _build_dataset_config(args: argparse.Namespace):
         std_thresh=args.std_thresh,
         use_circular_std=not args.use_linear_std,
         persist_computed_cor=args.persist_computed_cor,
+        timeseries_length=args.timeseries_length,
     )
 
 
@@ -143,6 +144,7 @@ def run_step(args: argparse.Namespace) -> None:
             model_type=args.ts_model,
             use_timestamp=not args.disable_timestamp,
             use_zscore=args.use_zscore,
+            timeseries_length=args.timeseries_length,
         )
         print(f"[full] result: {result}")
         return
@@ -157,6 +159,9 @@ def run_step(args: argparse.Namespace) -> None:
                 output_dir=args.output_dir,
                 metric=args.timeseries_metric,
                 matrix_mode=args.vit_matrix_mode,
+                cropped_dir=args.cropped_dir,
+                event_date=_as_datetime(args.event_date),
+                matrix_size=args.vit_matrix_size,
             )
         )
         print(f"[vit_build_dataset] vit dataset dir: {vit_dataset_dir}")
@@ -165,6 +170,8 @@ def run_step(args: argparse.Namespace) -> None:
     if args.step == "vit_train_predict":
         from .vit_modeling import ViTConfig, run_vit_training_and_prediction
 
+        default_vit_dataset_dir = args.output_dir / "vit_dataset"
+        dataset_dir = args.dataset_dir or (default_vit_dataset_dir if default_vit_dataset_dir.exists() else (args.output_dir / "dataset"))
         dataset_dir = args.dataset_dir or (args.output_dir / "dataset")
         predict_dir = run_vit_training_and_prediction(
             ViTConfig(
@@ -195,6 +202,8 @@ def run_step(args: argparse.Namespace) -> None:
             geom_reference_dir=args.geom_reference_dir,
             metric=args.timeseries_metric,
             matrix_mode=args.vit_matrix_mode,
+            timeseries_length=args.timeseries_length,
+            vit_matrix_size=args.vit_matrix_size,
         )
         print(f"[vit_full] result: {result}")
         return
@@ -237,6 +246,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--std-thresh", type=float, default=1.0)
     parser.add_argument("--use-linear-std", action="store_true", help="Use linear phase std; default is circular std.")
     parser.add_argument("--persist-computed-cor", action="store_true", help="Persist computed coherence as .cor files.")
+    parser.add_argument("--timeseries-length", type=int, default=None, help="Use only the most recent N adjacent pre-event pairs for RNN dataset build.")
 
     parser.add_argument("--lat-min", type=float, default=42.625)
     parser.add_argument("--lat-max", type=float, default=42.635)
@@ -253,6 +263,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--use-zscore", action="store_true", help="Enable logit+distribution prediction and zscore scoring.")
 
     parser.add_argument("--vit-matrix-mode", choices=["similarity", "outer", "difference"], default="similarity")
+    parser.add_argument("--vit-matrix-size", type=int, default=None, help="Use only the most recent N pre-event pairs to build the ViT NxN matrix dataset.")
     parser.add_argument("--vit-patch-size", type=int, default=2)
     parser.add_argument("--vit-hidden-dim", type=int, default=64)
     parser.add_argument("--vit-depth", type=int, default=4)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as dt
 import pickle
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,6 +11,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
+
+from .dataset_builder import DatasetConfig, calculate_std_from_cor, collect_pair_observations
 
 
 class PixelMatrixDataset(Dataset):
@@ -114,12 +117,65 @@ class ViTDatasetBuildConfig:
     output_dir: Path
     metric: Literal["phase_std", "coherence"] = "coherence"
     matrix_mode: Literal["similarity", "outer", "difference"] = "similarity"
+    cropped_dir: Path | None = None
+    event_date: dt.datetime = dt.datetime(2016, 8, 24)
+    matrix_size: int | None = None
 
 
 def _load_data(dataset_dir: Path, metric: str) -> np.ndarray:
     data_filename = "data_std.npy" if metric == "phase_std" else "data.npy"
     return np.load(dataset_dir / data_filename).astype(np.float32)
 
+
+def _parse_pair_dates(date_pair: str) -> tuple[dt.datetime, dt.datetime]:
+    s, e = date_pair.split("_")
+    return dt.datetime.strptime(s, "%Y%m%d"), dt.datetime.strptime(e, "%Y%m%d")
+
+
+def _build_all_pair_stack(cropped_dir: Path, event_date: dt.datetime, matrix_size: int | None) -> tuple[np.ndarray, list[str]]:
+    observations = collect_pair_observations(
+        DatasetConfig(cropped_dir=cropped_dir, output_dir=cropped_dir, input_source="cor")
+    )
+    pre_event_observations = []
+    for obs in observations:
+        _, pair, _ = obs
+        _, end_dt = _parse_pair_dates(pair)
+        if end_dt < event_date:
+            pre_event_observations.append(obs)
+
+    if matrix_size is not None:
+        if matrix_size < 2:
+            raise ValueError("vit_matrix_size must be >= 2 when provided")
+        if len(pre_event_observations) < matrix_size:
+            raise RuntimeError(
+                f"Requested vit_matrix_size={matrix_size}, but only "
+                f"{len(pre_event_observations)} pre-event pair interferograms are available."
+            )
+        selected = pre_event_observations[-matrix_size:]
+    else:
+        selected = pre_event_observations
+
+    if len(selected) < 3:
+        raise RuntimeError("Need at least 3 selected pre-event pair observations for ViT.")
+
+    h, w = selected[0][2].shape
+    stack = np.zeros((h, w, len(selected)), dtype=np.float32)
+    dates: list[str] = []
+    for i, (_, pair, coh) in enumerate(selected):
+        if coh.shape != (h, w):
+            raise ValueError(f"Shape mismatch for {pair}: {coh.shape} vs {(h, w)}")
+        stack[:, :, i] = coh.astype(np.float32)
+        dates.append(pair)
+    return stack, dates
+
+
+def build_and_save_vit_matrix_dataset(config: ViTDatasetBuildConfig) -> Path:
+    if config.cropped_dir is not None:
+        data, dates = _build_all_pair_stack(config.cropped_dir, config.event_date, config.matrix_size)
+    else:
+        data = _load_data(config.dataset_dir, config.metric)
+        with open(config.dataset_dir / "dates.pkl", "rb") as f:
+            dates = pickle.load(f)
 
 def build_and_save_vit_matrix_dataset(config: ViTDatasetBuildConfig) -> Path:
     data = _load_data(config.dataset_dir, config.metric)
@@ -132,6 +188,9 @@ def build_and_save_vit_matrix_dataset(config: ViTDatasetBuildConfig) -> Path:
 
     out_dir = config.output_dir / "vit_dataset"
     out_dir.mkdir(parents=True, exist_ok=True)
+    np.save(out_dir / "data.npy", data)
+    np.save(out_dir / "data_std.npy", calculate_std_from_cor(data))
+    np.save(out_dir / "matrix_data.npy", matrices)
     np.save(out_dir / "matrix_data.npy", matrices)
     with open(config.dataset_dir / "dates.pkl", "rb") as f:
         dates = pickle.load(f)
@@ -181,6 +240,7 @@ def run_vit_training_and_prediction(config: ViTConfig) -> Path:
     model.to(device)
 
     best_val = float("inf")
+    best_model_path = config.output_dir / "best_vit_model.pth"
     for _ in range(config.epochs):
         model.train()
         for batch in train_loader:
@@ -210,6 +270,9 @@ def run_vit_training_and_prediction(config: ViTConfig) -> Path:
 
         if val_loss < best_val:
             best_val = val_loss
+            torch.save(model.state_dict(), best_model_path)
+
+    model.load_state_dict(torch.load(best_model_path, map_location=device))
             torch.save(model.state_dict(), "best_vit_model.pth")
 
     model.load_state_dict(torch.load("best_vit_model.pth", map_location=device))
