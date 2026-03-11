@@ -177,6 +177,8 @@ def build_and_save_vit_matrix_dataset(config: ViTDatasetBuildConfig) -> Path:
         with open(config.dataset_dir / "dates.pkl", "rb") as f:
             dates = pickle.load(f)
 
+def build_and_save_vit_matrix_dataset(config: ViTDatasetBuildConfig) -> Path:
+    data = _load_data(config.dataset_dir, config.metric)
     base_ds = PixelMatrixDataset(data, is_prediction=True, matrix_mode=config.matrix_mode)
     matrices = np.zeros((base_ds.h, base_ds.w, base_ds.t, base_ds.t), dtype=np.float32)
 
@@ -189,6 +191,9 @@ def build_and_save_vit_matrix_dataset(config: ViTDatasetBuildConfig) -> Path:
     np.save(out_dir / "data.npy", data)
     np.save(out_dir / "data_std.npy", calculate_std_from_cor(data))
     np.save(out_dir / "matrix_data.npy", matrices)
+    np.save(out_dir / "matrix_data.npy", matrices)
+    with open(config.dataset_dir / "dates.pkl", "rb") as f:
+        dates = pickle.load(f)
     with open(out_dir / "dates.pkl", "wb") as f:
         pickle.dump(dates, f)
     return out_dir
@@ -268,6 +273,9 @@ def run_vit_training_and_prediction(config: ViTConfig) -> Path:
             torch.save(model.state_dict(), best_model_path)
 
     model.load_state_dict(torch.load(best_model_path, map_location=device))
+            torch.save(model.state_dict(), "best_vit_model.pth")
+
+    model.load_state_dict(torch.load("best_vit_model.pth", map_location=device))
     model.eval()
 
     pred_ds = PixelMatrixDataset(data, is_prediction=True, matrix_mode=config.matrix_mode)
