@@ -9,7 +9,15 @@ from .preprocess import CropConfig, batch_crop_filt_fine_cor
 from .scoring import ScoreConfig, compute_and_save_score
 
 
-def run_full_pipeline(base_dir: Path, geom_reference_dir: Path, next_date: str = "20160821_20160902") -> dict[str, Path]:
+def run_full_pipeline(
+    base_dir: Path,
+    geom_reference_dir: Path,
+    next_date: str = "20160821_20160902",
+    metric: str = "phase_std",
+    model_type: str = "lstm",
+    use_timestamp: bool = True,
+    use_zscore: bool = False,
+) -> dict[str, Path]:
     cropped_dir = base_dir / "cropped"
 
     batch_crop_filt_fine_cor(
@@ -17,9 +25,19 @@ def run_full_pipeline(base_dir: Path, geom_reference_dir: Path, next_date: str =
     )
     dataset_dir = build_and_save_dataset(DatasetConfig(cropped_dir=cropped_dir, output_dir=cropped_dir))
     predict_dir = run_training_and_prediction(
-        TrainingConfig(dataset_dir=dataset_dir, output_dir=cropped_dir, next_date=next_date)
+        TrainingConfig(
+            dataset_dir=dataset_dir,
+            output_dir=cropped_dir,
+            next_date=next_date,
+            metric=metric,
+            model_type=model_type,
+            use_timestamp=use_timestamp,
+            use_zscore=use_zscore,
+        )
     )
-    score_path = compute_and_save_score(ScoreConfig(dataset_dir=dataset_dir, predict_dir=predict_dir))
+    score_path = compute_and_save_score(
+        ScoreConfig(dataset_dir=dataset_dir, predict_dir=predict_dir, metric=metric, use_zscore=use_zscore)
+    )
 
     generate_geocoded_outputs(
         OutputConfig(
