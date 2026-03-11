@@ -10,9 +10,15 @@ from .dataset_builder import DatasetConfig, build_and_save_dataset, collect_pair
 from .isce_stack import StackPairProduct, discover_stack_pair_products, read_isce_int
 from .modeling import TrainingConfig, run_training_and_prediction
 from .output_products import OutputConfig, generate_geocoded_outputs
-from .pipeline import run_full_pipeline
+from .pipeline import run_full_pipeline, run_full_vit_pipeline
 from .preprocess import CropConfig, batch_crop_filt_fine_cor
 from .scoring import ScoreConfig, compute_and_save_score
+from .vit_modeling import (
+    ViTConfig,
+    ViTDatasetBuildConfig,
+    build_and_save_vit_matrix_dataset,
+    run_vit_training_and_prediction,
+)
 
 
 def app_main() -> None:
@@ -35,6 +41,7 @@ __all__ = [
     "OutputConfig",
     "generate_geocoded_outputs",
     "run_full_pipeline",
+    "run_full_vit_pipeline",
     "StackPairProduct",
     "discover_stack_pair_products",
     "read_isce_int",
@@ -45,4 +52,8 @@ __all__ = [
     "coh_crlb_from_std",
     "write_isce_bip_cor",
     "app_main",
+    "ViTConfig",
+    "ViTDatasetBuildConfig",
+    "build_and_save_vit_matrix_dataset",
+    "run_vit_training_and_prediction",
 ]
