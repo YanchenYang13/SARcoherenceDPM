@@ -9,7 +9,7 @@
   2. GRU + 时间信息 + 普通 score（非 zscore）
   3. 时间矩阵 ViT + zscore
 
-> 说明：以下所有单元格都在仓库根目录执行（例如 `/workspace/SARcoherenceDPM`）。
+> 说明：以下所有单元格都在仓库根目录执行（你当前为 `/data6/WORKDIR/amatrice2025/merged/SARcoherenceDPM-main`）。
 
 ---
 
@@ -21,6 +21,7 @@
 import os
 from pathlib import Path
 
+REPO_DIR = Path('/data6/WORKDIR/amatrice2025/merged/SARcoherenceDPM-main')
 BASE_DIR = Path('/data6/WORKDIR/AmatriceSenDT22/merged/interferograms')
 CROPPED_DIR = BASE_DIR / 'cropped'
 GEOM_DIR = Path('/data6/WORKDIR/AmatriceSenDT22/merged/geom_reference')
@@ -30,6 +31,9 @@ EVENT_DATE = '20160824'
 SEQUENCE_LENGTH = 10
 MATRIX_SIZE = 10
 
+os.chdir(REPO_DIR)
+
+print('REPO_DIR =', REPO_DIR)
 print('BASE_DIR =', BASE_DIR)
 print('CROPPED_DIR =', CROPPED_DIR)
 print('GEOM_DIR =', GEOM_DIR)
@@ -250,4 +254,3 @@ plt.title('Damage Proxy Score')
 plt.tight_layout()
 plt.show()
 ```
-
