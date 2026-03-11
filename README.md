@@ -237,9 +237,76 @@ The modeling module then trains an LSTM baseline and produces:
 
 ### C. Damage Proxy Scoring
 
-The scoring module computes a normalized contrast between observed and predicted post-event maps and writes:
+The scoring module supports two score branches and writes:
+
+#### 1) Normalized-index score (default, `use_zscore=False`)
+
+Let `obs` be the observed post-event map and `pred` be the predicted post-event map.
+
+- **phase_std mode** (`--timeseries-metric phase_std`):
+
+  ```text
+  score = (obs - pred) / (obs + pred + eps)
+  ```
+
+- **coherence mode** (`--timeseries-metric coherence`):
+
+  ```text
+  score = (pred - obs) / (obs + pred + eps)
+  ```
+
+  This is the sign-flipped form of the phase-std formula (numerator order swapped).
+
+#### 2) Z-score branch (`use_zscore=True`)
+
+When z-score mode is enabled, training/prediction switches to distribution prediction
+(mean + standard deviation), and scoring becomes metric-aware:
+
+```text
+phase_std: zscore = (obs - pred_mean) / (pred_std + eps)
+coherence: zscore = (pred_mean - obs) / (pred_std + eps)
+```
+
+In this branch:
+
+- model training applies metric-specific transform before sequence scaling:
+  - coherence: `logit(coherence)`
+  - phase_std: `phase_std -> coherence -> logit(coherence)`
+- prediction outputs `future_predictions.npy` (mean) and `future_prediction_std.npy` (std),
+- scoring loads both files and writes metric-consistent z-score values.
+
+Masking policy:
+
+- if either input pixel is NaN, score is NaN,
+- if either input pixel is 0, score is set to 0.
+
+Artifacts:
 
 * `score.npy`
+
+Optional artifact in z-score branch:
+
+* `future_prediction_std.npy`
+
+---
+
+## New CLI Options for Time-Series and Scoring
+
+The CLI now supports configurable metric/model/time-feature/z-score behavior:
+
+```bash
+python -m insar_pipeline.app --step train_predict \
+  --timeseries-metric phase_std \
+  --ts-model lstm \
+  --use-zscore
+```
+
+Available options:
+
+- `--timeseries-metric {phase_std,coherence}`: choose sequence variable and score formula family.
+- `--ts-model {lstm,gru}`: choose the RNN backbone.
+- `--disable-timestamp`: disable date-derived time features from `dates.pkl`.
+- `--use-zscore`: enable logit + distribution prediction + z-score scoring.
 
 ### D. Geospatial Output Generation
 
@@ -321,5 +388,3 @@ If this repository is used in operational or publication-oriented workflows, ple
 ## Related Notes
 
 This repository is intended to support **time-series-based InSAR damage assessment** workflows where post-event anomalies are interpreted relative to an expected no-disaster temporal baseline. It is particularly useful for studies that aim to move beyond simple two-date comparison and toward temporally informed post-event change interpretation.
-
-

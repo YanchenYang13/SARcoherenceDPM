@@ -87,6 +87,10 @@ def run_step(args: argparse.Namespace) -> None:
                 train_batch_size=args.train_batch_size,
                 pred_batch_size=args.pred_batch_size,
                 lr=args.lr,
+                metric=args.timeseries_metric,
+                model_type=args.ts_model,
+                use_timestamp=not args.disable_timestamp,
+                use_zscore=args.use_zscore,
             )
         )
         print(f"[train_predict] predict dir: {predict_dir}")
@@ -103,6 +107,8 @@ def run_step(args: argparse.Namespace) -> None:
                 predict_dir=predict_dir,
                 score_filename=args.score_filename,
                 chunk_size=args.score_chunk_size,
+                metric=args.timeseries_metric,
+                use_zscore=args.use_zscore,
             )
         )
         print(f"[score] score path: {score_path}")
@@ -130,6 +136,10 @@ def run_step(args: argparse.Namespace) -> None:
             base_dir=args.base_dir,
             geom_reference_dir=args.geom_reference_dir,
             next_date=args.next_date,
+            metric=args.timeseries_metric,
+            model_type=args.ts_model,
+            use_timestamp=not args.disable_timestamp,
+            use_zscore=args.use_zscore,
         )
         print(f"[full] result: {result}")
         return
@@ -182,6 +192,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--train-batch-size", type=int, default=128)
     parser.add_argument("--pred-batch-size", type=int, default=256)
     parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--timeseries-metric", choices=["phase_std", "coherence"], default="phase_std")
+    parser.add_argument("--ts-model", choices=["lstm", "gru"], default="lstm")
+    parser.add_argument("--disable-timestamp", action="store_true", help="Disable dates.pkl time feature inputs.")
+    parser.add_argument("--use-zscore", action="store_true", help="Enable logit+distribution prediction and zscore scoring.")
 
     parser.add_argument("--score-filename", default="score.npy")
     parser.add_argument("--score-chunk-size", type=int, default=512)
