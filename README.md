@@ -16,7 +16,6 @@ Compared with earlier notebook-centric workflows, this repository now provides a
 
 **crop → dataset → train/predict → score → output**
 
-<img width="4663" height="4000" alt="2" src="https://github.com/user-attachments/assets/57fdef2f-83dd-42f2-a39d-9332afc91bd9" />
 
 
 ---
