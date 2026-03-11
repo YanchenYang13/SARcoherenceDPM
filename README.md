@@ -244,6 +244,10 @@ Reference notebook for prediction and DPM generation.
 
 Reference notebook for geocoding and final output generation.
 
+### `docs/JUPYTER_NOTEBOOK_GUIDE_ZH.md`
+
+中文分步指南，面向在 **Jupyter Notebook** 中执行完整流程（含三条路径：LSTM+zscore、GRU+时间信息+普通score、ViT时间矩阵+zscore）。
+
 ---
 
 ## Detailed Workflow Notes
