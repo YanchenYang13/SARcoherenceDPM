@@ -13,6 +13,9 @@ STEP_CHOICES = [
     "score",
     "output",
     "full",
+    "vit_build_dataset",
+    "vit_train_predict",
+    "vit_full",
 ]
 
 
@@ -35,6 +38,7 @@ def _build_dataset_config(args: argparse.Namespace):
         std_thresh=args.std_thresh,
         use_circular_std=not args.use_linear_std,
         persist_computed_cor=args.persist_computed_cor,
+        timeseries_length=args.timeseries_length,
     )
 
 
@@ -87,6 +91,10 @@ def run_step(args: argparse.Namespace) -> None:
                 train_batch_size=args.train_batch_size,
                 pred_batch_size=args.pred_batch_size,
                 lr=args.lr,
+                metric=args.timeseries_metric,
+                model_type=args.ts_model,
+                use_timestamp=not args.disable_timestamp,
+                use_zscore=args.use_zscore,
             )
         )
         print(f"[train_predict] predict dir: {predict_dir}")
@@ -103,6 +111,8 @@ def run_step(args: argparse.Namespace) -> None:
                 predict_dir=predict_dir,
                 score_filename=args.score_filename,
                 chunk_size=args.score_chunk_size,
+                metric=args.timeseries_metric,
+                use_zscore=args.use_zscore,
             )
         )
         print(f"[score] score path: {score_path}")
@@ -130,8 +140,71 @@ def run_step(args: argparse.Namespace) -> None:
             base_dir=args.base_dir,
             geom_reference_dir=args.geom_reference_dir,
             next_date=args.next_date,
+            metric=args.timeseries_metric,
+            model_type=args.ts_model,
+            use_timestamp=not args.disable_timestamp,
+            use_zscore=args.use_zscore,
+            timeseries_length=args.timeseries_length,
         )
         print(f"[full] result: {result}")
+        return
+
+    if args.step == "vit_build_dataset":
+        from .vit_modeling import ViTDatasetBuildConfig, build_and_save_vit_matrix_dataset
+
+        dataset_dir = args.dataset_dir or (args.output_dir / "dataset")
+        vit_dataset_dir = build_and_save_vit_matrix_dataset(
+            ViTDatasetBuildConfig(
+                dataset_dir=dataset_dir,
+                output_dir=args.output_dir,
+                metric=args.timeseries_metric,
+                matrix_mode=args.vit_matrix_mode,
+                cropped_dir=args.cropped_dir,
+                event_date=_as_datetime(args.event_date),
+                matrix_size=args.vit_matrix_size,
+            )
+        )
+        print(f"[vit_build_dataset] vit dataset dir: {vit_dataset_dir}")
+        return
+
+    if args.step == "vit_train_predict":
+        from .vit_modeling import ViTConfig, run_vit_training_and_prediction
+
+        default_vit_dataset_dir = args.output_dir / "vit_dataset"
+        dataset_dir = args.dataset_dir or (default_vit_dataset_dir if default_vit_dataset_dir.exists() else (args.output_dir / "dataset"))
+        predict_dir = run_vit_training_and_prediction(
+            ViTConfig(
+                dataset_dir=dataset_dir,
+                output_dir=args.output_dir,
+                metric=args.timeseries_metric,
+                epochs=args.epochs,
+                train_batch_size=args.train_batch_size,
+                pred_batch_size=args.pred_batch_size,
+                lr=args.lr,
+                matrix_mode=args.vit_matrix_mode,
+                patch_size=args.vit_patch_size,
+                hidden_dim=args.vit_hidden_dim,
+                depth=args.vit_depth,
+                heads=args.vit_heads,
+                diag_mask_ratio=args.vit_diag_mask_ratio,
+                diag_loss_weight=args.vit_diag_loss_weight,
+            )
+        )
+        print(f"[vit_train_predict] predict dir: {predict_dir}")
+        return
+
+    if args.step == "vit_full":
+        from .pipeline import run_full_vit_pipeline
+
+        result = run_full_vit_pipeline(
+            base_dir=args.base_dir,
+            geom_reference_dir=args.geom_reference_dir,
+            metric=args.timeseries_metric,
+            matrix_mode=args.vit_matrix_mode,
+            timeseries_length=args.timeseries_length,
+            vit_matrix_size=args.vit_matrix_size,
+        )
+        print(f"[vit_full] result: {result}")
         return
 
     raise ValueError(f"Unsupported step: {args.step}")
@@ -172,6 +245,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--std-thresh", type=float, default=1.0)
     parser.add_argument("--use-linear-std", action="store_true", help="Use linear phase std; default is circular std.")
     parser.add_argument("--persist-computed-cor", action="store_true", help="Persist computed coherence as .cor files.")
+    parser.add_argument("--timeseries-length", type=int, default=None, help="Use only the most recent N adjacent pre-event pairs for RNN dataset build.")
 
     parser.add_argument("--lat-min", type=float, default=42.625)
     parser.add_argument("--lat-max", type=float, default=42.635)
@@ -182,6 +256,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--train-batch-size", type=int, default=128)
     parser.add_argument("--pred-batch-size", type=int, default=256)
     parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--timeseries-metric", choices=["phase_std", "coherence"], default="phase_std")
+    parser.add_argument("--ts-model", choices=["lstm", "gru"], default="lstm")
+    parser.add_argument("--disable-timestamp", action="store_true", help="Disable dates.pkl time feature inputs.")
+    parser.add_argument("--use-zscore", action="store_true", help="Enable logit+distribution prediction and zscore scoring.")
+
+    parser.add_argument("--vit-matrix-mode", choices=["similarity", "outer", "difference"], default="similarity")
+    parser.add_argument("--vit-matrix-size", type=int, default=None, help="Use only the most recent N pre-event pairs to build the ViT NxN matrix dataset.")
+    parser.add_argument("--vit-patch-size", type=int, default=2)
+    parser.add_argument("--vit-hidden-dim", type=int, default=64)
+    parser.add_argument("--vit-depth", type=int, default=4)
+    parser.add_argument("--vit-heads", type=int, default=4)
+    parser.add_argument("--vit-diag-mask-ratio", type=float, default=0.5)
+    parser.add_argument("--vit-diag-loss-weight", type=float, default=0.3)
 
     parser.add_argument("--score-filename", default="score.npy")
     parser.add_argument("--score-chunk-size", type=int, default=512)

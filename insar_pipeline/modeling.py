@@ -4,6 +4,7 @@ import datetime
 import pickle
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import torch
@@ -14,10 +15,21 @@ from torch.utils.data import DataLoader, Dataset
 
 
 class InSARDataset(Dataset):
-    def __init__(self, data: np.ndarray, dates: list[str], is_prediction: bool = False):
+    def __init__(
+        self,
+        data: np.ndarray,
+        dates: list[str],
+        is_prediction: bool = False,
+        use_timestamp: bool = True,
+        use_zscore: bool = False,
+        metric: Literal["phase_std", "coherence"] = "phase_std",
+    ):
         self.data = data
         self.height, self.width, self.time_steps = data.shape
         self.is_prediction = is_prediction
+        self.use_timestamp = use_timestamp
+        self.use_zscore = use_zscore
+        self.metric = metric
 
         self.time_features = []
         for date_str in dates:
@@ -41,6 +53,8 @@ class InSARDataset(Dataset):
             for j in range(self.width):
                 scaler = MinMaxScaler(feature_range=(-1, 1))
                 pixel_ts = self.data[i, j, :]
+                if self.use_zscore:
+                    pixel_ts = _to_zscore_training_space(pixel_ts, self.metric)
                 self.scaled_data[i, j, :] = scaler.fit_transform(pixel_ts.reshape(-1, 1)).flatten()
                 self.scalers[(i, j)] = scaler
 
@@ -63,6 +77,10 @@ class InSARDataset(Dataset):
             y = 0.0
             time_feat = self.time_features[: self.time_steps]
             target_time_feat = self.time_features[-1]
+
+        if not self.use_timestamp:
+            time_feat = np.zeros_like(time_feat, dtype=np.float32)
+            target_time_feat = np.zeros_like(target_time_feat, dtype=np.float32)
 
         return {
             "pixel_coords": torch.tensor([i, j]),
@@ -100,6 +118,47 @@ class InSARLSTM(nn.Module):
         return self.output_layer(combined).squeeze(-1)
 
 
+class InSARGRU(nn.Module):
+    def __init__(self, input_dim=1, hidden_dim=64, num_layers=2, dropout=0.1, time_feat_dim=7):
+        super().__init__()
+        self.input_embedding = nn.Linear(input_dim, hidden_dim)
+        self.time_embedding = nn.Linear(time_feat_dim, hidden_dim)
+        self.gru = nn.GRU(
+            input_size=hidden_dim,
+            hidden_size=hidden_dim,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=dropout if num_layers > 1 else 0,
+        )
+        self.target_time_proj = nn.Linear(time_feat_dim, hidden_dim)
+        self.output_layer = nn.Sequential(nn.Linear(hidden_dim * 2, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, 1))
+
+    def forward(self, src, time_features, target_time_features):
+        src = src.unsqueeze(-1)
+        src = self.input_embedding(src)
+        time_embed = self.time_embedding(time_features)
+        combined_input = src + time_embed
+        _, h_n = self.gru(combined_input)
+        seq_repr = h_n[-1]
+        target_time_embed = self.target_time_proj(target_time_features)
+        combined = torch.cat([seq_repr, target_time_embed], dim=-1)
+        return self.output_layer(combined).squeeze(-1)
+
+
+class InSARDistributionHead(nn.Module):
+    def __init__(self, base_model: nn.Module):
+        super().__init__()
+        self.base_model = base_model
+        self.mu_head = nn.Linear(1, 1)
+        self.logvar_head = nn.Linear(1, 1)
+
+    def forward(self, src, time_features, target_time_features):
+        base_out = self.base_model(src, time_features, target_time_features).unsqueeze(-1)
+        mu = self.mu_head(base_out).squeeze(-1)
+        logvar = self.logvar_head(base_out).squeeze(-1).clamp(min=-10.0, max=5.0)
+        return mu, logvar
+
+
 @dataclass
 class TrainingConfig:
     dataset_dir: Path
@@ -109,6 +168,67 @@ class TrainingConfig:
     train_batch_size: int = 128
     pred_batch_size: int = 256
     lr: float = 1e-3
+    metric: Literal["phase_std", "coherence"] = "phase_std"
+    model_type: Literal["lstm", "gru"] = "lstm"
+    use_timestamp: bool = True
+    use_zscore: bool = False
+
+
+def _safe_logit(values: np.ndarray, eps: float = 1e-6) -> np.ndarray:
+    clipped = np.clip(values, eps, 1 - eps)
+    return np.log(clipped / (1 - clipped)).astype(np.float32)
+
+
+def _safe_sigmoid(values: np.ndarray) -> np.ndarray:
+    return (1.0 / (1.0 + np.exp(-values))).astype(np.float32)
+
+
+def _phase_std_to_coherence(phase_std: np.ndarray, eps: float = 1e-6) -> np.ndarray:
+    std = np.clip(phase_std.astype(np.float32), eps, None)
+    denom = np.sqrt(1.0 + 2.0 * (std**2))
+    coh = 1.0 / denom
+    return np.clip(coh, eps, 1 - eps).astype(np.float32)
+
+
+def _coherence_to_phase_std(coh: np.ndarray, eps: float = 1e-6) -> np.ndarray:
+    c = np.clip(coh.astype(np.float32), eps, 1 - eps)
+    return np.sqrt((1.0 - c**2) / (2.0 * c**2 + eps)).astype(np.float32)
+
+
+def _to_zscore_training_space(values: np.ndarray, metric: str) -> np.ndarray:
+    if metric == "coherence":
+        return _safe_logit(values)
+    if metric == "phase_std":
+        return _safe_logit(_phase_std_to_coherence(values))
+    raise ValueError(f"Unsupported metric for zscore space: {metric}")
+
+
+def _from_zscore_training_space(values: np.ndarray, metric: str) -> np.ndarray:
+    coh = _safe_sigmoid(values)
+    if metric == "coherence":
+        return coh.astype(np.float32)
+    if metric == "phase_std":
+        return _coherence_to_phase_std(coh)
+    raise ValueError(f"Unsupported metric for zscore space: {metric}")
+
+
+def _zscore_space_to_metric_std(std_in_zspace: float, z_value: float, metric: str) -> float:
+    coh = float(_safe_sigmoid(np.array([z_value], dtype=np.float32))[0])
+    dcoh_dz = coh * (1.0 - coh)
+    if metric == "coherence":
+        return float(abs(dcoh_dz) * std_in_zspace)
+
+    # metric == "phase_std", where phase_std = sqrt((1-c^2)/(2*c^2))
+    c = max(coh, 1e-6)
+    one_minus_c2 = max(1.0 - c * c, 1e-8)
+    dstd_dc = -1.0 / (np.sqrt(2.0) * c * c * np.sqrt(one_minus_c2))
+    dstd_dz = dstd_dc * dcoh_dz
+    return float(abs(dstd_dz) * std_in_zspace)
+
+
+def _normal_nll(mu: torch.Tensor, logvar: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    var = torch.exp(logvar).clamp(min=1e-6)
+    return (0.5 * (logvar + ((target - mu) ** 2) / var)).mean()
 
 
 def train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs=50, device="cpu"):
@@ -125,7 +245,10 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
 
             optimizer.zero_grad()
             outputs = model(x, time_features, target_time_features)
-            loss = criterion(outputs, y)
+            if isinstance(outputs, tuple):
+                loss = criterion(outputs[0], outputs[1], y)
+            else:
+                loss = criterion(outputs, y)
             loss.backward()
             optimizer.step()
 
@@ -138,7 +261,11 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
                 target_time_features = batch["target_time_features"].to(device)
                 y = batch["y"].to(device)
                 outputs = model(x, time_features, target_time_features)
-                val_loss += criterion(outputs, y).item() * x.size(0)
+                if isinstance(outputs, tuple):
+                    loss = criterion(outputs[0], outputs[1], y)
+                else:
+                    loss = criterion(outputs, y)
+                val_loss += loss.item() * x.size(0)
         val_loss /= len(val_loader.dataset)
 
         if val_loss < best_val_loss:
@@ -148,9 +275,16 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
     return model
 
 
-def predict_future(model, dataset: InSARDataset, batch_size: int = 256, device="cpu") -> np.ndarray:
+def predict_future(
+    model,
+    dataset: InSARDataset,
+    batch_size: int = 256,
+    device="cpu",
+    use_zscore: bool = False,
+) -> tuple[np.ndarray, np.ndarray | None]:
     model.eval()
     predictions = np.zeros((dataset.height, dataset.width), dtype=np.float32)
+    pred_std = np.zeros((dataset.height, dataset.width), dtype=np.float32) if use_zscore else None
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
 
     with torch.no_grad():
@@ -160,20 +294,47 @@ def predict_future(model, dataset: InSARDataset, batch_size: int = 256, device="
             time_features = batch["time_features"].to(device)
             target_time_features = batch["target_time_features"].to(device)
             outputs = model(x, time_features, target_time_features)
+            if isinstance(outputs, tuple):
+                pred_mean, pred_logvar = outputs
+                model_output = pred_mean
+                model_std = torch.exp(0.5 * pred_logvar)
+            else:
+                model_output = outputs
+                model_std = None
             for i in range(len(coords)):
                 pixel_i, pixel_j = coords[i]
                 scaler = dataset.scalers[(pixel_i, pixel_j)]
-                predictions[pixel_i, pixel_j] = scaler.inverse_transform(outputs[i].cpu().numpy().reshape(-1, 1))[0, 0]
+                pred_value = scaler.inverse_transform(model_output[i].cpu().numpy().reshape(-1, 1))[0, 0]
+                if dataset.use_zscore:
+                    pred_value = _from_zscore_training_space(np.array([pred_value], dtype=np.float32), dataset.metric)[0]
+                predictions[pixel_i, pixel_j] = pred_value
+                if pred_std is not None and model_std is not None:
+                    latent_std = model_std[i].item() / (scaler.scale_[0] + 1e-12)
+                    latent_mean = scaler.inverse_transform(model_output[i].cpu().numpy().reshape(-1, 1))[0, 0]
+                    pred_std[pixel_i, pixel_j] = _zscore_space_to_metric_std(latent_std, latent_mean, dataset.metric)
 
-    return predictions
+    return predictions, pred_std
+
+
+def _build_model(model_type: str) -> nn.Module:
+    if model_type == "gru":
+        return InSARGRU()
+    return InSARLSTM()
 
 
 def run_training_and_prediction(config: TrainingConfig) -> Path:
-    data = np.load(config.dataset_dir / "data_std.npy")
+    data_filename = "data_std.npy" if config.metric == "phase_std" else "data.npy"
+    data = np.load(config.dataset_dir / data_filename)
     with open(config.dataset_dir / "dates.pkl", "rb") as f:
         dates = pickle.load(f)
 
-    full_dataset = InSARDataset(data, dates)
+    full_dataset = InSARDataset(
+        data,
+        dates,
+        use_timestamp=config.use_timestamp,
+        use_zscore=config.use_zscore,
+        metric=config.metric,
+    )
     train_size = int(0.8 * len(full_dataset))
     val_size = len(full_dataset) - train_size
     train_dataset, val_dataset = torch.utils.data.random_split(full_dataset, [train_size, val_size])
@@ -181,8 +342,9 @@ def run_training_and_prediction(config: TrainingConfig) -> Path:
     train_loader = DataLoader(train_dataset, batch_size=config.train_batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=config.train_batch_size, shuffle=False)
 
-    model = InSARLSTM()
-    criterion = nn.MSELoss()
+    base_model = _build_model(config.model_type)
+    model = InSARDistributionHead(base_model) if config.use_zscore else base_model
+    criterion = _normal_nll if config.use_zscore else nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=config.lr)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -190,11 +352,26 @@ def run_training_and_prediction(config: TrainingConfig) -> Path:
     model.load_state_dict(torch.load("best_model.pth", map_location=device))
 
     all_dates = dates + [config.next_date]
-    predict_dataset = InSARDataset(data, all_dates, is_prediction=True)
-    future_predictions = predict_future(model, predict_dataset, batch_size=config.pred_batch_size, device=device)
+    predict_dataset = InSARDataset(
+        data,
+        all_dates,
+        is_prediction=True,
+        use_timestamp=config.use_timestamp,
+        use_zscore=config.use_zscore,
+        metric=config.metric,
+    )
+    future_predictions, future_pred_std = predict_future(
+        model,
+        predict_dataset,
+        batch_size=config.pred_batch_size,
+        device=device,
+        use_zscore=config.use_zscore,
+    )
 
     predict_dir = config.output_dir / "predict"
     predict_dir.mkdir(parents=True, exist_ok=True)
     np.save(predict_dir / "future_predictions.npy", future_predictions)
+    if future_pred_std is not None:
+        np.save(predict_dir / "future_prediction_std.npy", future_pred_std)
     torch.save(model.state_dict(), predict_dir / "best_model.pth")
     return predict_dir
