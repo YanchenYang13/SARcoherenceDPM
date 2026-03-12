@@ -8,6 +8,7 @@ from typing import Literal
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 
@@ -75,20 +76,42 @@ class MaskedDiagonalViT(nn.Module):
         enc_layer = nn.TransformerEncoderLayer(d_model=dim, nhead=heads, batch_first=True)
         self.encoder = nn.TransformerEncoder(enc_layer, num_layers=depth)
 
-        self.reg_head = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, 1))
+        self.mu_head = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, 1))
+        self.logvar_head = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, 1))
         self.diag_head = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, seq_len))
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def _resize_pos_embed(self, token_count_with_cls: int) -> torch.Tensor:
+        if token_count_with_cls == self.pos_embed.size(1):
+            return self.pos_embed[:, :token_count_with_cls, :]
+
+        cls_pos = self.pos_embed[:, :1, :]
+        spatial_pos = self.pos_embed[:, 1:, :]  # [1, N, C]
+
+        old_grid = int((spatial_pos.size(1)) ** 0.5)
+        new_grid = int((token_count_with_cls - 1) ** 0.5)
+        if new_grid * new_grid != (token_count_with_cls - 1):
+            raise ValueError(
+                f"Token count without cls must be a perfect square, got {token_count_with_cls - 1}"
+            )
+
+        spatial_pos = spatial_pos.reshape(1, old_grid, old_grid, self.dim).permute(0, 3, 1, 2)
+        spatial_pos = F.interpolate(spatial_pos, size=(new_grid, new_grid), mode="bicubic", align_corners=False)
+        spatial_pos = spatial_pos.permute(0, 2, 3, 1).reshape(1, new_grid * new_grid, self.dim)
+        return torch.cat([cls_pos, spatial_pos], dim=1)
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # x: [B, 1, L, L]
         tokens = self.patch_embed(x).flatten(2).transpose(1, 2)
         cls = self.cls_token.expand(x.size(0), -1, -1)
         tokens = torch.cat([cls, tokens], dim=1)
-        tokens = tokens + self.pos_embed[:, : tokens.size(1), :]
+        pos_embed = self._resize_pos_embed(tokens.size(1)).to(tokens.dtype).to(tokens.device)
+        tokens = tokens + pos_embed
         encoded = self.encoder(tokens)
         cls_out = encoded[:, 0]
-        pred = self.reg_head(cls_out).squeeze(-1)
+        pred_mu = self.mu_head(cls_out).squeeze(-1)
+        pred_logvar = self.logvar_head(cls_out).squeeze(-1).clamp(min=-10.0, max=5.0)
         diag_pred = self.diag_head(cls_out)
-        return pred, diag_pred
+        return pred_mu, pred_logvar, diag_pred
 
 
 @dataclass
@@ -107,6 +130,9 @@ class ViTConfig:
     heads: int = 4
     diag_mask_ratio: float = 0.5
     diag_loss_weight: float = 0.3
+    use_zscore: bool = False
+    optimizer: Literal["adam", "adamw"] = "adam"
+    weight_decay: float = 0.0
 
 
 @dataclass
@@ -186,6 +212,11 @@ def _apply_diag_mask(matrix: torch.Tensor, ratio: float) -> tuple[torch.Tensor, 
     return masked, mask
 
 
+
+def _normal_nll(mu: torch.Tensor, logvar: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    var = torch.exp(logvar).clamp(min=1e-6)
+    return (0.5 * (logvar + ((target - mu) ** 2) / var)).mean()
+
 def run_vit_training_and_prediction(config: ViTConfig) -> Path:
     data = _load_sequence_data(config.dataset_dir, config.metric)
 
@@ -208,7 +239,10 @@ def run_vit_training_and_prediction(config: ViTConfig) -> Path:
         depth=config.depth,
         heads=config.heads,
     )
-    optimizer = optim.Adam(model.parameters(), lr=config.lr)
+    if config.optimizer == "adamw":
+        optimizer = optim.AdamW(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
+    else:
+        optimizer = optim.Adam(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
     mse = nn.MSELoss()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
@@ -222,8 +256,8 @@ def run_vit_training_and_prediction(config: ViTConfig) -> Path:
             diag = batch["diag"].to(device)
 
             matrix_masked, diag_mask = _apply_diag_mask(matrix, config.diag_mask_ratio)
-            pred, diag_pred = model(matrix_masked)
-            reg_loss = mse(pred, y)
+            pred_mu, pred_logvar, diag_pred = model(matrix_masked)
+            reg_loss = _normal_nll(pred_mu, pred_logvar, y) if config.use_zscore else mse(pred_mu, y)
             diag_loss = ((diag_pred - diag) ** 2)[diag_mask].mean()
             loss = reg_loss + config.diag_loss_weight * diag_loss
 
@@ -237,31 +271,42 @@ def run_vit_training_and_prediction(config: ViTConfig) -> Path:
             for batch in val_loader:
                 matrix = batch["matrix"].to(device)
                 y = batch["y"].to(device)
-                pred, _ = model(matrix)
-                val_loss += mse(pred, y).item() * y.size(0)
+                pred_mu, pred_logvar, _ = model(matrix)
+                batch_loss = _normal_nll(pred_mu, pred_logvar, y) if config.use_zscore else mse(pred_mu, y)
+                val_loss += batch_loss.item() * y.size(0)
         val_loss /= len(val_subset)
 
         if val_loss < best_val:
             best_val = val_loss
             torch.save(model.state_dict(), "best_vit_model.pth")
 
-    model.load_state_dict(torch.load("best_vit_model.pth", map_location=device))
+    try:
+        state_dict = torch.load("best_vit_model.pth", map_location=device, weights_only=True)
+    except TypeError:
+        state_dict = torch.load("best_vit_model.pth", map_location=device)
+    model.load_state_dict(state_dict)
     model.eval()
 
     pred_ds = PixelMatrixDataset(data, is_prediction=True, matrix_mode=config.matrix_mode)
     pred_loader = DataLoader(pred_ds, batch_size=config.pred_batch_size, shuffle=False)
     predictions = np.zeros((pred_ds.h, pred_ds.w), dtype=np.float32)
+    pred_std = np.zeros((pred_ds.h, pred_ds.w), dtype=np.float32) if config.use_zscore else None
 
     with torch.no_grad():
         for batch in pred_loader:
             coords = batch["pixel_coords"].numpy()
             matrix = batch["matrix"].to(device)
-            pred, _ = model(matrix)
+            pred_mu, pred_logvar, _ = model(matrix)
+            pred_sigma = torch.exp(0.5 * pred_logvar)
             for k, (i, j) in enumerate(coords):
-                predictions[i, j] = pred[k].item()
+                predictions[i, j] = pred_mu[k].item()
+                if pred_std is not None:
+                    pred_std[i, j] = pred_sigma[k].item()
 
     predict_dir = config.output_dir / "predict"
     predict_dir.mkdir(parents=True, exist_ok=True)
     np.save(predict_dir / "future_predictions.npy", predictions)
+    if pred_std is not None:
+        np.save(predict_dir / "future_prediction_std.npy", pred_std)
     torch.save(model.state_dict(), predict_dir / "best_vit_model.pth")
     return predict_dir

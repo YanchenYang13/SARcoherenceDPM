@@ -184,6 +184,15 @@ python -m insar_pipeline.app --step train_predict \
   --output-dir /data6/WORKDIR/AmatriceSenDT22/merged/interferograms/cropped
 ```
 
+You can externalize model/data hyperparameters via JSON:
+
+```bash
+python -m insar_pipeline.app --step train_predict \
+  --base-dir /data6/WORKDIR/AmatriceSenDT22/merged/interferograms \
+  --output-dir /data6/WORKDIR/AmatriceSenDT22/merged/interferograms/cropped \
+  --param-file configs/model_params.example.json
+```
+
 ### 3b. Build ViT Temporal-Matrix Dataset
 
 ```bash
@@ -348,6 +357,7 @@ Available options:
 - `--use-zscore`: enable logit + distribution prediction + z-score scoring.
 - `--sequence-length`: limit pre-event adjacent interferometric pairs used to build the time-series window.
 - `--matrix-size`: define the number of pre-event acquisition dates used for matrix-pair range filtering.
+- `--param-file`: JSON file to set dataset/RNN/ViT hyperparameters in one place (CLI values still override file values when explicitly set).
 
 ViT extension options:
 

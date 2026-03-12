@@ -37,6 +37,7 @@ VIT_DEPTH = 4
 
 RNN_DATASET_DIR = CROPPED_DIR / 'dataset_rnn'
 VIT_DATASET_DIR = CROPPED_DIR / 'vit_dataset'
+PARAM_FILE = REPO_DIR / 'configs' / 'model_params.example.json'
 
 os.chdir(REPO_DIR)
 
@@ -46,6 +47,7 @@ print('CROPPED_DIR =', CROPPED_DIR)
 print('GEOM_DIR =', GEOM_DIR)
 print('RNN_DATASET_DIR =', RNN_DATASET_DIR)
 print('VIT_DATASET_DIR =', VIT_DATASET_DIR)
+print('PARAM_FILE =', PARAM_FILE)
 
 # ViT 关键约束：内部使用 seq_len = SEQUENCE_LENGTH - 1
 # 需满足：(SEQUENCE_LENGTH - 1) % VIT_PATCH_SIZE == 0
@@ -73,6 +75,14 @@ def run_cmd(cmd: str):
 
 ## 2. 数据准备（裁剪 + 构建数据集）
 
+### Cell 2.5：可选（推荐）参数文件统一管理
+
+```python
+# 将网络结构、训练超参数、sequence_length/matrix_size 统一放在 JSON 文件中维护
+# 可复制 configs/model_params.example.json 另存为你的实验配置
+print('param file exists =', PARAM_FILE.exists())
+```
+
 ### Cell 3：执行裁剪（已裁剪可跳过）
 
 ```python
@@ -97,7 +107,8 @@ run_cmd(
     f"--input-source cor "
     f"--timeseries-metric coherence "
     f"--sequence-length {SEQUENCE_LENGTH} "
-    f"--matrix-size {MATRIX_SIZE}"
+    f"--matrix-size {MATRIX_SIZE} "
+    f"--param-file {PARAM_FILE}"
 )
 ```
 
@@ -125,7 +136,8 @@ run_cmd(
     f"--dataset-dir {RNN_DATASET_DIR} "
     f"--timeseries-metric coherence "
     f"--ts-model lstm "
-    f"--use-zscore"
+    f"--use-zscore "
+    f"--param-file {PARAM_FILE}"
 )
 ```
 
@@ -139,7 +151,8 @@ run_cmd(
     f"--dataset-dir {RNN_DATASET_DIR} "
     f"--predict-dir {CROPPED_DIR / 'predict'} "
     f"--timeseries-metric coherence "
-    f"--use-zscore"
+    f"--use-zscore "
+    f"--param-file {PARAM_FILE}"
 )
 ```
 
@@ -158,7 +171,8 @@ run_cmd(
     f"--output-dir {CROPPED_DIR} "
     f"--dataset-dir {RNN_DATASET_DIR} "
     f"--timeseries-metric coherence "
-    f"--ts-model gru"
+    f"--ts-model gru "
+    f"--param-file {PARAM_FILE}"
 )
 ```
 
@@ -171,7 +185,8 @@ run_cmd(
     f"--output-dir {CROPPED_DIR} "
     f"--dataset-dir {RNN_DATASET_DIR} "
     f"--predict-dir {CROPPED_DIR / 'predict'} "
-    f"--timeseries-metric coherence"
+    f"--timeseries-metric coherence "
+    f"--param-file {PARAM_FILE}"
 )
 ```
 
@@ -188,7 +203,8 @@ run_cmd(
     f"--output-dir {CROPPED_DIR} "
     f"--dataset-dir {RNN_DATASET_DIR} "
     f"--timeseries-metric coherence "
-    f"--vit-matrix-mode similarity"
+    f"--vit-matrix-mode similarity "
+    f"--param-file {PARAM_FILE}"
 )
 ```
 
@@ -208,14 +224,35 @@ run_cmd(
     f"--timeseries-metric coherence "
     f"--vit-matrix-mode similarity "
     f"--vit-patch-size {VIT_PATCH_SIZE} "
-    f"--vit-depth {VIT_DEPTH}"
+    f"--vit-depth {VIT_DEPTH} "
+    f"--param-file {PARAM_FILE}"
 )
 ```
 
-> 若出现你遇到的 `RuntimeError: size of tensor a (...) must match tensor b (...)`，优先检查两点：
-> 1) 代码版本是否包含本次修复（`vit_modeling.py` 中先 `cat` 再加 `pos_embed`）；
-> 2) 参数是否满足 `(SEQUENCE_LENGTH - 1) % VIT_PATCH_SIZE == 0`。
->    例如 `SEQUENCE_LENGTH=10` 时建议 `VIT_PATCH_SIZE=1/3/9`；若 `VIT_PATCH_SIZE=2`，则建议把 `SEQUENCE_LENGTH` 改为 `9/11/13/...`。
+> 若出现你遇到的 `RuntimeError: size of tensor a (...) must match tensor b (...)`，常见原因是：
+> 训练阶段输入长度是 `t-1`（预测最后一个历史点），而推理阶段输入长度是 `t`（预测下一时刻），
+> 导致 patch token 数变化，`pos_embed` 长度不匹配。
+>
+> 本仓库已修复为**自动插值位置编码**（`_resize_pos_embed`），可兼容训练/推理 token 数不一致。
+> 当前实现也与“遮蔽对角线自监督 + 高斯(mean,std)输出 + z-score评分”流程对齐。
+> 仍建议保持参数可整除：`(SEQUENCE_LENGTH - 1) % VIT_PATCH_SIZE == 0`，以避免 patch 切分异常。
+
+### Cell 11.2：先做快速冒烟（可选，强烈建议）
+
+```python
+run_cmd(
+    f"python -m insar_pipeline.app --step vit_train_predict "
+    f"--base-dir {BASE_DIR} "
+    f"--output-dir {CROPPED_DIR} "
+    f"--dataset-dir {VIT_DATASET_DIR} "
+    f"--timeseries-metric coherence "
+    f"--vit-matrix-mode similarity "
+    f"--vit-patch-size {VIT_PATCH_SIZE} "
+    f"--vit-depth {VIT_DEPTH} "
+    f"--epochs 1 "
+    f"--param-file {PARAM_FILE}"
+)
+```
 
 ### Cell 11.5：快速确认 ViT 产物（建议）
 
