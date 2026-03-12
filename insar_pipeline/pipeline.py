@@ -7,7 +7,7 @@ from .modeling import TrainingConfig, run_training_and_prediction
 from .output_products import OutputConfig, generate_geocoded_outputs
 from .preprocess import CropConfig, batch_crop_filt_fine_cor
 from .scoring import ScoreConfig, compute_and_save_score
-from .vit_modeling import ViTConfig, run_vit_training_and_prediction
+from .vit_modeling import ViTConfig, ViTDatasetBuildConfig, build_and_save_vit_matrix_dataset, run_vit_training_and_prediction
 
 
 def run_full_pipeline(
@@ -86,10 +86,13 @@ def run_full_vit_pipeline(
             matrix_size=matrix_size,
         )
     )
-    predict_dir = run_vit_training_and_prediction(
-        ViTConfig(dataset_dir=dataset_dir, output_dir=cropped_dir, metric=metric, matrix_mode=matrix_mode)
+    vit_dataset_dir = build_and_save_vit_matrix_dataset(
+        ViTDatasetBuildConfig(dataset_dir=dataset_dir, output_dir=cropped_dir, metric=metric, matrix_mode=matrix_mode)
     )
-    score_path = compute_and_save_score(ScoreConfig(dataset_dir=dataset_dir, predict_dir=predict_dir, metric=metric))
+    predict_dir = run_vit_training_and_prediction(
+        ViTConfig(dataset_dir=vit_dataset_dir, output_dir=cropped_dir, metric=metric, matrix_mode=matrix_mode)
+    )
+    score_path = compute_and_save_score(ScoreConfig(dataset_dir=vit_dataset_dir, predict_dir=predict_dir, metric=metric))
 
     generate_geocoded_outputs(
         OutputConfig(
@@ -102,6 +105,7 @@ def run_full_vit_pipeline(
     return {
         "cropped_dir": cropped_dir,
         "dataset_dir": dataset_dir,
+        "vit_dataset_dir": vit_dataset_dir,
         "predict_dir": predict_dir,
         "score_path": score_path,
     }
