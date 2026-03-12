@@ -82,7 +82,8 @@ class MaskedDiagonalViT(nn.Module):
         # x: [B, 1, L, L]
         tokens = self.patch_embed(x).flatten(2).transpose(1, 2)
         cls = self.cls_token.expand(x.size(0), -1, -1)
-        tokens = torch.cat([cls, tokens], dim=1) + self.pos_embed[:, : tokens.size(1), :]
+        tokens = torch.cat([cls, tokens], dim=1)
+        tokens = tokens + self.pos_embed[:, : tokens.size(1), :]
         encoded = self.encoder(tokens)
         cls_out = encoded[:, 0]
         pred = self.reg_head(cls_out).squeeze(-1)

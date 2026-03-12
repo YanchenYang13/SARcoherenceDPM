@@ -38,6 +38,8 @@ def _build_dataset_config(args: argparse.Namespace):
         std_thresh=args.std_thresh,
         use_circular_std=not args.use_linear_std,
         persist_computed_cor=args.persist_computed_cor,
+        sequence_length=args.sequence_length,
+        matrix_size=args.matrix_size,
     )
 
 
@@ -143,6 +145,8 @@ def run_step(args: argparse.Namespace) -> None:
             model_type=args.ts_model,
             use_timestamp=not args.disable_timestamp,
             use_zscore=args.use_zscore,
+            sequence_length=args.sequence_length,
+            matrix_size=args.matrix_size,
         )
         print(f"[full] result: {result}")
         return
@@ -195,6 +199,8 @@ def run_step(args: argparse.Namespace) -> None:
             geom_reference_dir=args.geom_reference_dir,
             metric=args.timeseries_metric,
             matrix_mode=args.vit_matrix_mode,
+            sequence_length=args.sequence_length,
+            matrix_size=args.matrix_size,
         )
         print(f"[vit_full] result: {result}")
         return
@@ -237,6 +243,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--std-thresh", type=float, default=1.0)
     parser.add_argument("--use-linear-std", action="store_true", help="Use linear phase std; default is circular std.")
     parser.add_argument("--persist-computed-cor", action="store_true", help="Persist computed coherence as .cor files.")
+    parser.add_argument("--sequence-length", type=int, default=None, help="Number of nearest pre-event adjacent pairs to keep for time series.")
+    parser.add_argument("--matrix-size", type=int, default=None, help="Number of pre-event acquisition dates used for matrix-pair filtering.")
 
     parser.add_argument("--lat-min", type=float, default=42.625)
     parser.add_argument("--lat-max", type=float, default=42.635)

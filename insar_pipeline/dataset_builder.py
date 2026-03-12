@@ -27,10 +27,74 @@ class DatasetConfig:
     std_thresh: float = 1.0
     use_circular_std: bool = True
     persist_computed_cor: bool = False
+    sequence_length: int | None = None
+    matrix_size: int | None = None
 
 
 def _date_to_dt(date_str: str) -> dt.datetime:
     return dt.datetime.strptime(date_str.split("_")[0], "%Y%m%d")
+
+
+def parse_date_pair(date_pair: str) -> tuple[dt.datetime, dt.datetime]:
+    master_str, slave_str = date_pair.split("_")
+    return dt.datetime.strptime(master_str, "%Y%m%d"), dt.datetime.strptime(slave_str, "%Y%m%d")
+
+
+def filter_adjacent_pairs(
+    observations: list[tuple[dt.datetime, str, np.ndarray]],
+) -> list[tuple[dt.datetime, str, np.ndarray]]:
+    adjacent: list[tuple[dt.datetime, str, np.ndarray]] = []
+    for obs in observations:
+        _, date_pair, _ = obs
+        master_dt, slave_dt = parse_date_pair(date_pair)
+        if (slave_dt - master_dt).days <= 13:
+            adjacent.append(obs)
+    return adjacent
+
+
+def select_adjacent_sequence_window(
+    observations: list[tuple[dt.datetime, str, np.ndarray]],
+    reference_date: dt.datetime,
+    sequence_length: int | None,
+) -> list[tuple[dt.datetime, str, np.ndarray]]:
+    pre_event_adjacent = [
+        obs for obs in filter_adjacent_pairs(observations) if parse_date_pair(obs[1])[1] < reference_date
+    ]
+    pre_event_adjacent.sort(key=lambda x: parse_date_pair(x[1])[1], reverse=True)
+    if sequence_length is not None:
+        if sequence_length < 1:
+            raise ValueError("sequence_length must be >= 1")
+        pre_event_adjacent = pre_event_adjacent[:sequence_length]
+    return sorted(pre_event_adjacent, key=lambda x: parse_date_pair(x[1])[1])
+
+
+def select_matrix_pair_window(
+    observations: list[tuple[dt.datetime, str, np.ndarray]],
+    reference_date: dt.datetime,
+    matrix_size: int | None,
+) -> tuple[list[str], list[tuple[dt.datetime, str, np.ndarray]]]:
+    if matrix_size is None:
+        return [], []
+    if matrix_size < 1:
+        raise ValueError("matrix_size must be >= 1")
+
+    acquisition_dates = sorted(
+        {
+            d
+            for _, date_pair, _ in observations
+            for d in parse_date_pair(date_pair)
+            if d < reference_date
+        }
+    )
+    selected_dates = acquisition_dates[-matrix_size:]
+    selected_set = set(selected_dates)
+    matrix_observations = [
+        obs
+        for obs in observations
+        if all(d in selected_set for d in parse_date_pair(obs[1]))
+    ]
+    selected_date_str = [d.strftime("%Y%m%d") for d in selected_dates]
+    return selected_date_str, sorted(matrix_observations, key=lambda x: parse_date_pair(x[1]))
 
 
 def find_cor_files_sorted(cropped_dir: Path) -> list[tuple[dt.datetime, str, Path]]:
@@ -168,11 +232,26 @@ def save_dataset(output_subfolder: Path, timeseries: np.ndarray, dates: list[str
 
 def build_and_save_dataset(config: DatasetConfig) -> Path:
     observations = collect_pair_observations(config)
-    train_observations = [obs for obs in observations if obs[0] < config.event_date]
+    train_observations = select_adjacent_sequence_window(
+        observations,
+        reference_date=config.event_date,
+        sequence_length=config.sequence_length,
+    )
+
+    matrix_date_window, matrix_observations = select_matrix_pair_window(
+        observations,
+        reference_date=config.event_date,
+        matrix_size=config.matrix_size,
+    )
 
     timeseries, dates = build_insar_timeseries_from_observations(train_observations)
     geninue_data = observations[-1][2]
 
     output_subfolder = config.output_dir / "dataset"
     save_dataset(output_subfolder, timeseries, dates, geninue_data)
+    if matrix_date_window:
+        with open(output_subfolder / "matrix_dates.pkl", "wb") as f:
+            pickle.dump(matrix_date_window, f)
+        with open(output_subfolder / "matrix_pairs.pkl", "wb") as f:
+            pickle.dump([obs[1] for obs in matrix_observations], f)
     return output_subfolder
