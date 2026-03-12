@@ -321,6 +321,7 @@ In this branch:
   - coherence: `logit(coherence)`
   - phase_std: `phase_std -> coherence -> logit(coherence)`
 - prediction outputs `future_predictions.npy` (mean) and `future_prediction_std.npy` (std),
+- method-specific prefixed artifacts are also written (e.g., `rnn_*_future_predictions.npy`, `vit_*_future_predictions.npy`) to avoid cross-method overwrites,
 - scoring loads both files and writes metric-consistent z-score values.
 
 Masking policy:
@@ -330,7 +331,7 @@ Masking policy:
 
 Artifacts:
 
-* `score.npy`
+* `score.npy` (or auto-prefixed `rnn_*_score.npy` / `vit_*_score.npy` by default in CLI runs)
 
 Optional artifact in z-score branch:
 

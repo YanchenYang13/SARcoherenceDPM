@@ -35,6 +35,9 @@ MATRIX_SIZE = 10
 VIT_PATCH_SIZE = 1
 VIT_DEPTH = 4
 
+RNN_PREFIX = f"rnn_lstm_coherence_zscore_time"
+VIT_PREFIX = f"vit_similarity_coherence_zscore_p{VIT_PATCH_SIZE}_d{VIT_DEPTH}"
+
 RNN_DATASET_DIR = CROPPED_DIR / 'dataset_rnn'
 VIT_DATASET_DIR = CROPPED_DIR / 'vit_dataset'
 PARAM_FILE = REPO_DIR / 'configs' / 'model_params.example.json'
@@ -48,6 +51,8 @@ print('GEOM_DIR =', GEOM_DIR)
 print('RNN_DATASET_DIR =', RNN_DATASET_DIR)
 print('VIT_DATASET_DIR =', VIT_DATASET_DIR)
 print('PARAM_FILE =', PARAM_FILE)
+print('RNN_PREFIX(example)=', RNN_PREFIX)
+print('VIT_PREFIX(example)=', VIT_PREFIX)
 
 # ViT 关键约束：内部使用 seq_len = SEQUENCE_LENGTH - 1
 # 需满足：(SEQUENCE_LENGTH - 1) % VIT_PATCH_SIZE == 0
@@ -260,6 +265,7 @@ run_cmd(
 print('vit_dataset exists =', VIT_DATASET_DIR.exists())
 print('rnn_data in vit_dataset exists =', (VIT_DATASET_DIR / 'rnn_data.npy').exists())
 print('predict file exists =', (CROPPED_DIR / 'predict' / 'future_predictions.npy').exists())
+print('prefixed vit predict exists =', (CROPPED_DIR / 'predict' / f'{VIT_PREFIX}_future_predictions.npy').exists())
 ```
 
 ### Cell 12：score（zscore）
@@ -302,7 +308,9 @@ run_cmd(
 2. **快速调试**：
    - 先把 `SEQUENCE_LENGTH` 与 `MATRIX_SIZE` 设小一点，确认流程跑通后再增大。
 3. **显式检查输出**：
-   - 每跑完一条路径，检查 `future_predictions.npy`、`score.npy`、（zscore 分支下）`future_prediction_std.npy`（并确认其所在目录与当前路径对应：RNN 用 dataset_rnn，ViT 用 vit_dataset） 是否生成。
+   - 每跑完一条路径，检查通用文件与带前缀文件是否同时生成：
+     - 通用：`future_predictions.npy`、`future_prediction_std.npy`、`*_score.npy`
+     - 前缀：`rnn_*_future_predictions.npy` / `vit_*_future_predictions.npy`，避免不同方法互相覆盖混淆。
 
 ---
 

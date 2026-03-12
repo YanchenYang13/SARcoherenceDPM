@@ -10,6 +10,17 @@ from .scoring import ScoreConfig, compute_and_save_score
 from .vit_modeling import ViTConfig, ViTDatasetBuildConfig, build_and_save_vit_matrix_dataset, run_vit_training_and_prediction
 
 
+def _rnn_prefix(metric: str, model_type: str, use_zscore: bool, use_timestamp: bool) -> str:
+    ztag = "zscore" if use_zscore else "raw"
+    ttag = "time" if use_timestamp else "notime"
+    return f"rnn_{model_type}_{metric}_{ztag}_{ttag}"
+
+
+def _vit_prefix(metric: str, matrix_mode: str, use_zscore: bool, patch: int, depth: int) -> str:
+    ztag = "zscore" if use_zscore else "raw"
+    return f"vit_{matrix_mode}_{metric}_{ztag}_p{patch}_d{depth}"
+
+
 def run_full_pipeline(
     base_dir: Path,
     geom_reference_dir: Path,
@@ -55,10 +66,11 @@ def run_full_pipeline(
             optimizer=optimizer,
             weight_decay=weight_decay,
             max_grad_norm=max_grad_norm,
+            artifact_prefix=_rnn_prefix(metric, model_type, use_zscore, use_timestamp),
         )
     )
     score_path = compute_and_save_score(
-        ScoreConfig(dataset_dir=dataset_dir, predict_dir=predict_dir, metric=metric, use_zscore=use_zscore)
+        ScoreConfig(dataset_dir=dataset_dir, predict_dir=predict_dir, metric=metric, use_zscore=use_zscore, score_filename=f"{_rnn_prefix(metric, model_type, use_zscore, use_timestamp)}_score.npy", artifact_prefix=_rnn_prefix(metric, model_type, use_zscore, use_timestamp))
     )
 
     generate_geocoded_outputs(
@@ -125,9 +137,10 @@ def run_full_vit_pipeline(
             use_zscore=use_zscore,
             optimizer=optimizer,
             weight_decay=weight_decay,
+            artifact_prefix=_vit_prefix(metric, matrix_mode, use_zscore, vit_patch_size, vit_depth),
         )
     )
-    score_path = compute_and_save_score(ScoreConfig(dataset_dir=vit_dataset_dir, predict_dir=predict_dir, metric=metric, use_zscore=use_zscore))
+    score_path = compute_and_save_score(ScoreConfig(dataset_dir=vit_dataset_dir, predict_dir=predict_dir, metric=metric, use_zscore=use_zscore, score_filename=f"{_vit_prefix(metric, matrix_mode, use_zscore, vit_patch_size, vit_depth)}_score.npy", artifact_prefix=_vit_prefix(metric, matrix_mode, use_zscore, vit_patch_size, vit_depth)))
 
     generate_geocoded_outputs(
         OutputConfig(

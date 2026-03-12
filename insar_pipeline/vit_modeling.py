@@ -133,6 +133,7 @@ class ViTConfig:
     use_zscore: bool = False
     optimizer: Literal["adam", "adamw"] = "adam"
     weight_decay: float = 0.0
+    artifact_prefix: str = ""
 
 
 @dataclass
@@ -248,7 +249,7 @@ def run_vit_training_and_prediction(config: ViTConfig) -> Path:
     model.to(device)
 
     best_val = float("inf")
-    for _ in range(config.epochs):
+    for epoch in range(config.epochs):
         model.train()
         for batch in train_loader:
             matrix = batch["matrix"].to(device)
@@ -276,6 +277,7 @@ def run_vit_training_and_prediction(config: ViTConfig) -> Path:
                 val_loss += batch_loss.item() * y.size(0)
         val_loss /= len(val_subset)
 
+        print(f"[ViT][epoch {epoch + 1}/{config.epochs}] val_loss={val_loss:.6f} best={best_val:.6f}")
         if val_loss < best_val:
             best_val = val_loss
             torch.save(model.state_dict(), "best_vit_model.pth")
@@ -306,7 +308,13 @@ def run_vit_training_and_prediction(config: ViTConfig) -> Path:
     predict_dir = config.output_dir / "predict"
     predict_dir.mkdir(parents=True, exist_ok=True)
     np.save(predict_dir / "future_predictions.npy", predictions)
+    if config.artifact_prefix:
+        np.save(predict_dir / f"{config.artifact_prefix}_future_predictions.npy", predictions)
     if pred_std is not None:
         np.save(predict_dir / "future_prediction_std.npy", pred_std)
+        if config.artifact_prefix:
+            np.save(predict_dir / f"{config.artifact_prefix}_future_prediction_std.npy", pred_std)
     torch.save(model.state_dict(), predict_dir / "best_vit_model.pth")
+    if config.artifact_prefix:
+        torch.save(model.state_dict(), predict_dir / f"{config.artifact_prefix}_best_vit_model.pth")
     return predict_dir

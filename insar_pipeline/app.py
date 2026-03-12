@@ -71,16 +71,63 @@ def _apply_param_overrides(args: argparse.Namespace, defaults: argparse.Namespac
             setattr(args, arg_key, value)
 
 
+def _section(title: str) -> None:
+    line = "=" * 64
+    print(f"\n{line}\n[STEP] {title}\n{line}")
+
+
+def _kv(key: str, value) -> None:
+    print(f"  - {key}: {value}")
+
+
+def _artifact_prefix_for_rnn(args: argparse.Namespace) -> str:
+    ztag = "zscore" if args.use_zscore else "raw"
+    ttag = "time" if not args.disable_timestamp else "notime"
+    return f"rnn_{args.ts_model}_{args.timeseries_metric}_{ztag}_{ttag}"
+
+
+def _artifact_prefix_for_vit(args: argparse.Namespace) -> str:
+    ztag = "zscore" if args.use_zscore else "raw"
+    return f"vit_{args.vit_matrix_mode}_{args.timeseries_metric}_{ztag}_p{args.vit_patch_size}_d{args.vit_depth}"
+
+
+def _default_score_filename(args: argparse.Namespace, dataset_dir: Path) -> str:
+    if args.score_filename != "score.npy":
+        return args.score_filename
+    if "vit" in dataset_dir.name:
+        return f"{_artifact_prefix_for_vit(args)}_score.npy"
+    return f"{_artifact_prefix_for_rnn(args)}_score.npy"
+
+
+def _show_predict_artifacts(predict_dir: Path, prefix: str, use_zscore: bool) -> None:
+    names = [
+        "future_predictions.npy",
+        f"{prefix}_future_predictions.npy",
+        "best_model.pth",
+        "best_vit_model.pth",
+        f"{prefix}_best_model.pth",
+        f"{prefix}_best_vit_model.pth",
+    ]
+    if use_zscore:
+        names += ["future_prediction_std.npy", f"{prefix}_future_prediction_std.npy"]
+    print("  - artifacts:")
+    for n in names:
+        p = predict_dir / n
+        if p.exists():
+            print(f"    * {n}")
+
+
 def run_step(args: argparse.Namespace) -> None:
+    _section(args.step)
     if args.step == "load_data":
         from .dataset_builder import collect_pair_observations
 
         cfg = _build_dataset_config(args)
         observations = collect_pair_observations(cfg)
-        print(f"[load_data] observation count: {len(observations)}")
+        _kv("observation_count", len(observations))
         if observations:
-            print(f"[load_data] first: {observations[0][1]}, shape={observations[0][2].shape}")
-            print(f"[load_data] last : {observations[-1][1]}, shape={observations[-1][2].shape}")
+            _kv("first", f"{observations[0][1]} shape={observations[0][2].shape}")
+            _kv("last", f"{observations[-1][1]} shape={observations[-1][2].shape}")
         return
 
     if args.step == "crop":
@@ -97,20 +144,23 @@ def run_step(args: argparse.Namespace) -> None:
                 lon_max=args.lon_max,
             )
         )
-        print(f"[crop] cropped file count: {len(outputs)}")
+        _kv("cropped_file_count", len(outputs))
         return
 
     if args.step == "build_dataset":
         from .dataset_builder import build_and_save_dataset
 
         dataset_dir = build_and_save_dataset(_build_dataset_config(args))
-        print(f"[build_dataset] dataset dir: {dataset_dir}")
+        _kv("dataset_dir", dataset_dir)
         return
 
     if args.step == "train_predict":
         from .modeling import TrainingConfig, run_training_and_prediction
 
         dataset_dir = args.dataset_dir or (args.output_dir / "dataset_rnn")
+        prefix = _artifact_prefix_for_rnn(args)
+        _kv("dataset_dir", dataset_dir)
+        _kv("artifact_prefix", prefix)
         predict_dir = run_training_and_prediction(
             TrainingConfig(
                 dataset_dir=dataset_dir,
@@ -130,9 +180,10 @@ def run_step(args: argparse.Namespace) -> None:
                 optimizer=args.optimizer,
                 weight_decay=args.weight_decay,
                 max_grad_norm=args.max_grad_norm,
+                artifact_prefix=prefix,
             )
         )
-        print(f"[train_predict] predict dir: {predict_dir}")
+        _show_predict_artifacts(predict_dir, prefix, args.use_zscore)
         return
 
     if args.step == "score":
@@ -140,17 +191,24 @@ def run_step(args: argparse.Namespace) -> None:
 
         dataset_dir = args.dataset_dir or (args.output_dir / "dataset_rnn")
         predict_dir = args.predict_dir or (args.output_dir / "predict")
+        prefix = _artifact_prefix_for_vit(args) if "vit" in dataset_dir.name else _artifact_prefix_for_rnn(args)
+        score_filename = _default_score_filename(args, dataset_dir)
+        _kv("dataset_dir", dataset_dir)
+        _kv("predict_dir", predict_dir)
+        _kv("artifact_prefix", prefix)
+        _kv("score_filename", score_filename)
         score_path = compute_and_save_score(
             ScoreConfig(
                 dataset_dir=dataset_dir,
                 predict_dir=predict_dir,
-                score_filename=args.score_filename,
+                score_filename=score_filename,
                 chunk_size=args.score_chunk_size,
                 metric=args.timeseries_metric,
                 use_zscore=args.use_zscore,
+                artifact_prefix=prefix,
             )
         )
-        print(f"[score] score path: {score_path}")
+        _kv("score_path", score_path)
         return
 
     if args.step == "output":
@@ -165,7 +223,9 @@ def run_step(args: argparse.Namespace) -> None:
                 subset_params=args.subset_params,
             )
         )
-        print(f"[output] generated files: {output_files}")
+        print("  - output files:")
+        for f in output_files:
+            print(f"    * {f}")
         return
 
     if args.step == "full":
@@ -188,7 +248,9 @@ def run_step(args: argparse.Namespace) -> None:
             weight_decay=args.weight_decay,
             max_grad_norm=args.max_grad_norm,
         )
-        print(f"[full] result: {result}")
+        print("  - full pipeline result:")
+        for k, v in result.items():
+            _kv(k, v)
         return
 
     if args.step == "vit_build_dataset":
@@ -203,13 +265,16 @@ def run_step(args: argparse.Namespace) -> None:
                 matrix_mode=args.vit_matrix_mode,
             )
         )
-        print(f"[vit_build_dataset] vit dataset dir: {vit_dataset_dir}")
+        _kv("vit_dataset_dir", vit_dataset_dir)
         return
 
     if args.step == "vit_train_predict":
         from .vit_modeling import ViTConfig, run_vit_training_and_prediction
 
         dataset_dir = args.dataset_dir or (args.output_dir / "vit_dataset")
+        prefix = _artifact_prefix_for_vit(args)
+        _kv("dataset_dir", dataset_dir)
+        _kv("artifact_prefix", prefix)
         predict_dir = run_vit_training_and_prediction(
             ViTConfig(
                 dataset_dir=dataset_dir,
@@ -229,9 +294,10 @@ def run_step(args: argparse.Namespace) -> None:
                 use_zscore=args.use_zscore,
                 optimizer=args.optimizer,
                 weight_decay=args.weight_decay,
+                artifact_prefix=prefix,
             )
         )
-        print(f"[vit_train_predict] predict dir: {predict_dir}")
+        _show_predict_artifacts(predict_dir, prefix, args.use_zscore)
         return
 
     if args.step == "vit_full":
@@ -254,7 +320,9 @@ def run_step(args: argparse.Namespace) -> None:
             optimizer=args.optimizer,
             weight_decay=args.weight_decay,
         )
-        print(f"[vit_full] result: {result}")
+        print("  - vit_full pipeline result:")
+        for k, v in result.items():
+            _kv(k, v)
         return
 
     raise ValueError(f"Unsupported step: {args.step}")

@@ -178,6 +178,7 @@ class TrainingConfig:
     optimizer: Literal["adam", "adamw"] = "adam"
     weight_decay: float = 0.0
     max_grad_norm: float | None = None
+    artifact_prefix: str = ""
 
 
 def _safe_logit(values: np.ndarray, eps: float = 1e-6) -> np.ndarray:
@@ -241,7 +242,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
     model.to(device)
     best_val_loss = float("inf")
 
-    for _ in range(num_epochs):
+    for epoch in range(num_epochs):
         model.train()
         for batch in train_loader:
             x = batch["x"].to(device)
@@ -276,6 +277,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
                 val_loss += loss.item() * x.size(0)
         val_loss /= len(val_loader.dataset)
 
+        print(f"[RNN][epoch {epoch + 1}/{num_epochs}] val_loss={val_loss:.6f} best={best_val_loss:.6f}")
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             torch.save(model.state_dict(), "best_model.pth")
@@ -400,7 +402,13 @@ def run_training_and_prediction(config: TrainingConfig) -> Path:
     predict_dir = config.output_dir / "predict"
     predict_dir.mkdir(parents=True, exist_ok=True)
     np.save(predict_dir / "future_predictions.npy", future_predictions)
+    if config.artifact_prefix:
+        np.save(predict_dir / f"{config.artifact_prefix}_future_predictions.npy", future_predictions)
     if future_pred_std is not None:
         np.save(predict_dir / "future_prediction_std.npy", future_pred_std)
+        if config.artifact_prefix:
+            np.save(predict_dir / f"{config.artifact_prefix}_future_prediction_std.npy", future_pred_std)
     torch.save(model.state_dict(), predict_dir / "best_model.pth")
+    if config.artifact_prefix:
+        torch.save(model.state_dict(), predict_dir / f"{config.artifact_prefix}_best_model.pth")
     return predict_dir

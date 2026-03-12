@@ -15,6 +15,7 @@ class ScoreConfig:
     chunk_size: int = 512
     metric: Literal["phase_std", "coherence"] = "phase_std"
     use_zscore: bool = False
+    artifact_prefix: str = ""
 
 
 def calculate_difference(
@@ -60,15 +61,37 @@ def _resolve_observation_filename(dataset_dir: Path, metric: str) -> str:
 def compute_and_save_score(config: ScoreConfig) -> Path:
     genuine_filename = _resolve_observation_filename(config.dataset_dir, config.metric)
     genuine_data = np.load(config.dataset_dir / genuine_filename)
-    future_predictions = np.load(config.predict_dir / "future_predictions.npy")
+    pred_candidates = []
+    if config.artifact_prefix:
+        pred_candidates.append(f"{config.artifact_prefix}_future_predictions.npy")
+    pred_candidates.append("future_predictions.npy")
+
+    pred_path = None
+    for name in pred_candidates:
+        p = config.predict_dir / name
+        if p.exists():
+            pred_path = p
+            break
+    if pred_path is None:
+        raise FileNotFoundError(f"No prediction file found in {config.predict_dir}. Tried: {pred_candidates}")
+    future_predictions = np.load(pred_path)
 
     if genuine_data.ndim == 3:
         genuine_data = np.squeeze(genuine_data, axis=-1)
 
     if config.use_zscore:
-        pred_std_path = config.predict_dir / "future_prediction_std.npy"
-        if not pred_std_path.exists():
-            raise FileNotFoundError("future_prediction_std.npy is required when use_zscore=True")
+        std_candidates = []
+        if config.artifact_prefix:
+            std_candidates.append(f"{config.artifact_prefix}_future_prediction_std.npy")
+        std_candidates.append("future_prediction_std.npy")
+        pred_std_path = None
+        for name in std_candidates:
+            p = config.predict_dir / name
+            if p.exists():
+                pred_std_path = p
+                break
+        if pred_std_path is None:
+            raise FileNotFoundError(f"future_prediction_std.npy is required when use_zscore=True. Tried: {std_candidates}")
         future_pred_std = np.load(pred_std_path)
         if config.metric == "coherence":
             zscore = (future_predictions - genuine_data) / (future_pred_std + 1e-8)
@@ -88,4 +111,7 @@ def compute_and_save_score(config: ScoreConfig) -> Path:
 
     output_path = config.predict_dir / config.score_filename
     np.save(output_path, score)
+    if config.artifact_prefix:
+        prefixed_path = config.predict_dir / f"{config.artifact_prefix}_{config.score_filename}"
+        np.save(prefixed_path, score)
     return output_path
