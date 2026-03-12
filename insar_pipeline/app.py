@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import datetime as dt
 from pathlib import Path
 
@@ -38,7 +39,36 @@ def _build_dataset_config(args: argparse.Namespace):
         std_thresh=args.std_thresh,
         use_circular_std=not args.use_linear_std,
         persist_computed_cor=args.persist_computed_cor,
+        sequence_length=args.sequence_length,
+        matrix_size=args.matrix_size,
     )
+
+
+def _load_param_file(path: Path) -> dict:
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError("--param-file must point to a JSON object")
+    return data
+
+
+def _apply_param_overrides(args: argparse.Namespace, defaults: argparse.Namespace) -> None:
+    if args.param_file is None:
+        return
+
+    params = _load_param_file(args.param_file)
+    merged: dict = {}
+    for section in ("global", "dataset", "rnn", "vit"):
+        sec = params.get(section, {})
+        if isinstance(sec, dict):
+            merged.update(sec)
+
+    for key, value in merged.items():
+        arg_key = key.replace("-", "_")
+        if not hasattr(args, arg_key):
+            continue
+        if getattr(args, arg_key) == getattr(defaults, arg_key):
+            setattr(args, arg_key, value)
 
 
 def run_step(args: argparse.Namespace) -> None:
@@ -80,7 +110,7 @@ def run_step(args: argparse.Namespace) -> None:
     if args.step == "train_predict":
         from .modeling import TrainingConfig, run_training_and_prediction
 
-        dataset_dir = args.dataset_dir or (args.output_dir / "dataset")
+        dataset_dir = args.dataset_dir or (args.output_dir / "dataset_rnn")
         predict_dir = run_training_and_prediction(
             TrainingConfig(
                 dataset_dir=dataset_dir,
@@ -94,6 +124,12 @@ def run_step(args: argparse.Namespace) -> None:
                 model_type=args.ts_model,
                 use_timestamp=not args.disable_timestamp,
                 use_zscore=args.use_zscore,
+                hidden_dim=args.rnn_hidden_dim,
+                num_layers=args.rnn_num_layers,
+                dropout=args.rnn_dropout,
+                optimizer=args.optimizer,
+                weight_decay=args.weight_decay,
+                max_grad_norm=args.max_grad_norm,
             )
         )
         print(f"[train_predict] predict dir: {predict_dir}")
@@ -102,7 +138,7 @@ def run_step(args: argparse.Namespace) -> None:
     if args.step == "score":
         from .scoring import ScoreConfig, compute_and_save_score
 
-        dataset_dir = args.dataset_dir or (args.output_dir / "dataset")
+        dataset_dir = args.dataset_dir or (args.output_dir / "dataset_rnn")
         predict_dir = args.predict_dir or (args.output_dir / "predict")
         score_path = compute_and_save_score(
             ScoreConfig(
@@ -143,6 +179,14 @@ def run_step(args: argparse.Namespace) -> None:
             model_type=args.ts_model,
             use_timestamp=not args.disable_timestamp,
             use_zscore=args.use_zscore,
+            sequence_length=args.sequence_length,
+            matrix_size=args.matrix_size,
+            rnn_hidden_dim=args.rnn_hidden_dim,
+            rnn_num_layers=args.rnn_num_layers,
+            rnn_dropout=args.rnn_dropout,
+            optimizer=args.optimizer,
+            weight_decay=args.weight_decay,
+            max_grad_norm=args.max_grad_norm,
         )
         print(f"[full] result: {result}")
         return
@@ -150,7 +194,7 @@ def run_step(args: argparse.Namespace) -> None:
     if args.step == "vit_build_dataset":
         from .vit_modeling import ViTDatasetBuildConfig, build_and_save_vit_matrix_dataset
 
-        dataset_dir = args.dataset_dir or (args.output_dir / "dataset")
+        dataset_dir = args.dataset_dir or (args.output_dir / "dataset_rnn")
         vit_dataset_dir = build_and_save_vit_matrix_dataset(
             ViTDatasetBuildConfig(
                 dataset_dir=dataset_dir,
@@ -165,7 +209,7 @@ def run_step(args: argparse.Namespace) -> None:
     if args.step == "vit_train_predict":
         from .vit_modeling import ViTConfig, run_vit_training_and_prediction
 
-        dataset_dir = args.dataset_dir or (args.output_dir / "dataset")
+        dataset_dir = args.dataset_dir or (args.output_dir / "vit_dataset")
         predict_dir = run_vit_training_and_prediction(
             ViTConfig(
                 dataset_dir=dataset_dir,
@@ -182,6 +226,9 @@ def run_step(args: argparse.Namespace) -> None:
                 heads=args.vit_heads,
                 diag_mask_ratio=args.vit_diag_mask_ratio,
                 diag_loss_weight=args.vit_diag_loss_weight,
+                use_zscore=args.use_zscore,
+                optimizer=args.optimizer,
+                weight_decay=args.weight_decay,
             )
         )
         print(f"[vit_train_predict] predict dir: {predict_dir}")
@@ -195,6 +242,17 @@ def run_step(args: argparse.Namespace) -> None:
             geom_reference_dir=args.geom_reference_dir,
             metric=args.timeseries_metric,
             matrix_mode=args.vit_matrix_mode,
+            sequence_length=args.sequence_length,
+            matrix_size=args.matrix_size,
+            use_zscore=args.use_zscore,
+            vit_patch_size=args.vit_patch_size,
+            vit_hidden_dim=args.vit_hidden_dim,
+            vit_depth=args.vit_depth,
+            vit_heads=args.vit_heads,
+            vit_diag_mask_ratio=args.vit_diag_mask_ratio,
+            vit_diag_loss_weight=args.vit_diag_loss_weight,
+            optimizer=args.optimizer,
+            weight_decay=args.weight_decay,
         )
         print(f"[vit_full] result: {result}")
         return
@@ -220,6 +278,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=Path, default=None, help="Defaults to <base-dir>/cropped")
 
     parser.add_argument("--dataset-dir", type=Path, default=None, help="Optional override for dataset directory")
+    parser.add_argument("--param-file", type=Path, default=None, help="JSON parameter file for dataset/RNN/ViT hyperparameters.")
     parser.add_argument("--predict-dir", type=Path, default=None, help="Optional override for predict directory")
 
     parser.add_argument("--event-date", default="20160824", help="Earthquake date in YYYYMMDD")
@@ -237,6 +296,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--std-thresh", type=float, default=1.0)
     parser.add_argument("--use-linear-std", action="store_true", help="Use linear phase std; default is circular std.")
     parser.add_argument("--persist-computed-cor", action="store_true", help="Persist computed coherence as .cor files.")
+    parser.add_argument("--sequence-length", type=int, default=None, help="Number of nearest pre-event adjacent pairs to keep for time series.")
+    parser.add_argument("--matrix-size", type=int, default=None, help="Number of pre-event acquisition dates used for matrix-pair filtering.")
 
     parser.add_argument("--lat-min", type=float, default=42.625)
     parser.add_argument("--lat-max", type=float, default=42.635)
@@ -249,6 +310,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--timeseries-metric", choices=["phase_std", "coherence"], default="phase_std")
     parser.add_argument("--ts-model", choices=["lstm", "gru"], default="lstm")
+    parser.add_argument("--rnn-hidden-dim", type=int, default=64)
+    parser.add_argument("--rnn-num-layers", type=int, default=2)
+    parser.add_argument("--rnn-dropout", type=float, default=0.1)
     parser.add_argument("--disable-timestamp", action="store_true", help="Disable dates.pkl time feature inputs.")
     parser.add_argument("--use-zscore", action="store_true", help="Enable logit+distribution prediction and zscore scoring.")
 
@@ -259,6 +323,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--vit-heads", type=int, default=4)
     parser.add_argument("--vit-diag-mask-ratio", type=float, default=0.5)
     parser.add_argument("--vit-diag-loss-weight", type=float, default=0.3)
+
+    parser.add_argument("--optimizer", choices=["adam", "adamw"], default="adam")
+    parser.add_argument("--weight-decay", type=float, default=0.0)
+    parser.add_argument("--max-grad-norm", type=float, default=None)
 
     parser.add_argument("--score-filename", default="score.npy")
     parser.add_argument("--score-chunk-size", type=int, default=512)
@@ -272,7 +340,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     parser = build_parser()
+    defaults = parser.parse_args([])
     args = parser.parse_args()
+    _apply_param_overrides(args, defaults)
 
     if args.cropped_dir is None:
         args.cropped_dir = args.base_dir / "cropped"

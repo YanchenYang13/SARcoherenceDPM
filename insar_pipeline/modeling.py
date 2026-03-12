@@ -172,6 +172,12 @@ class TrainingConfig:
     model_type: Literal["lstm", "gru"] = "lstm"
     use_timestamp: bool = True
     use_zscore: bool = False
+    hidden_dim: int = 64
+    num_layers: int = 2
+    dropout: float = 0.1
+    optimizer: Literal["adam", "adamw"] = "adam"
+    weight_decay: float = 0.0
+    max_grad_norm: float | None = None
 
 
 def _safe_logit(values: np.ndarray, eps: float = 1e-6) -> np.ndarray:
@@ -231,7 +237,7 @@ def _normal_nll(mu: torch.Tensor, logvar: torch.Tensor, target: torch.Tensor) ->
     return (0.5 * (logvar + ((target - mu) ** 2) / var)).mean()
 
 
-def train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs=50, device="cpu"):
+def train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs=50, device="cpu", max_grad_norm: float | None = None):
     model.to(device)
     best_val_loss = float("inf")
 
@@ -250,6 +256,8 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
             else:
                 loss = criterion(outputs, y)
             loss.backward()
+            if max_grad_norm is not None and max_grad_norm > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
             optimizer.step()
 
         model.eval()
@@ -316,14 +324,23 @@ def predict_future(
     return predictions, pred_std
 
 
-def _build_model(model_type: str) -> nn.Module:
-    if model_type == "gru":
-        return InSARGRU()
-    return InSARLSTM()
+def _build_model(config: TrainingConfig) -> nn.Module:
+    model_kwargs = dict(hidden_dim=config.hidden_dim, num_layers=config.num_layers, dropout=config.dropout)
+    if config.model_type == "gru":
+        return InSARGRU(**model_kwargs)
+    return InSARLSTM(**model_kwargs)
 
+
+
+def _resolve_timeseries_filename(dataset_dir: Path, metric: str) -> str:
+    candidates = ["rnn_data_std.npy", "data_std.npy"] if metric == "phase_std" else ["rnn_data.npy", "data.npy"]
+    for name in candidates:
+        if (dataset_dir / name).exists():
+            return name
+    raise FileNotFoundError(f"No timeseries dataset file found in {dataset_dir}. Tried: {candidates}")
 
 def run_training_and_prediction(config: TrainingConfig) -> Path:
-    data_filename = "data_std.npy" if config.metric == "phase_std" else "data.npy"
+    data_filename = _resolve_timeseries_filename(config.dataset_dir, config.metric)
     data = np.load(config.dataset_dir / data_filename)
     with open(config.dataset_dir / "dates.pkl", "rb") as f:
         dates = pickle.load(f)
@@ -342,13 +359,25 @@ def run_training_and_prediction(config: TrainingConfig) -> Path:
     train_loader = DataLoader(train_dataset, batch_size=config.train_batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=config.train_batch_size, shuffle=False)
 
-    base_model = _build_model(config.model_type)
+    base_model = _build_model(config)
     model = InSARDistributionHead(base_model) if config.use_zscore else base_model
     criterion = _normal_nll if config.use_zscore else nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=config.lr)
+    if config.optimizer == "adamw":
+        optimizer = optim.AdamW(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
+    else:
+        optimizer = optim.Adam(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs=config.epochs, device=device)
+    train_model(
+        model,
+        train_loader,
+        val_loader,
+        criterion,
+        optimizer,
+        num_epochs=config.epochs,
+        device=device,
+        max_grad_norm=config.max_grad_norm,
+    )
     model.load_state_dict(torch.load("best_model.pth", map_location=device))
 
     all_dates = dates + [config.next_date]

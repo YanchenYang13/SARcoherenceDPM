@@ -184,6 +184,15 @@ python -m insar_pipeline.app --step train_predict \
   --output-dir /data6/WORKDIR/AmatriceSenDT22/merged/interferograms/cropped
 ```
 
+You can externalize model/data hyperparameters via JSON:
+
+```bash
+python -m insar_pipeline.app --step train_predict \
+  --base-dir /data6/WORKDIR/AmatriceSenDT22/merged/interferograms \
+  --output-dir /data6/WORKDIR/AmatriceSenDT22/merged/interferograms/cropped \
+  --param-file configs/model_params.example.json
+```
+
 ### 3b. Build ViT Temporal-Matrix Dataset
 
 ```bash
@@ -243,6 +252,10 @@ Reference notebook for prediction and DPM generation.
 ### `Part3_Output.ipynb`
 
 Reference notebook for geocoding and final output generation.
+
+### `docs/JUPYTER_NOTEBOOK_GUIDE_ZH.md`
+
+中文分步指南，面向在 **Jupyter Notebook** 中执行完整流程（含三条路径：LSTM+zscore、GRU+时间信息+普通score、ViT时间矩阵+zscore）。
 
 ---
 
@@ -342,6 +355,9 @@ Available options:
 - `--ts-model {lstm,gru}`: choose the RNN backbone.
 - `--disable-timestamp`: disable date-derived time features from `dates.pkl`.
 - `--use-zscore`: enable logit + distribution prediction + z-score scoring.
+- `--sequence-length`: limit pre-event adjacent interferometric pairs used to build the time-series window.
+- `--matrix-size`: define the number of pre-event acquisition dates used for matrix-pair range filtering.
+- `--param-file`: JSON file to set dataset/RNN/ViT hyperparameters in one place (CLI values still override file values when explicitly set).
 
 ViT extension options:
 

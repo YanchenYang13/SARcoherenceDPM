@@ -49,8 +49,16 @@ def calculate_difference(
     return difference
 
 
+
+def _resolve_observation_filename(dataset_dir: Path, metric: str) -> str:
+    candidates = ["score_observation_std.npy", "geninue_std.npy"] if metric == "phase_std" else ["score_observation.npy", "geninue.npy"]
+    for name in candidates:
+        if (dataset_dir / name).exists():
+            return name
+    raise FileNotFoundError(f"No score observation file found in {dataset_dir}. Tried: {candidates}")
+
 def compute_and_save_score(config: ScoreConfig) -> Path:
-    genuine_filename = "geninue_std.npy" if config.metric == "phase_std" else "geninue.npy"
+    genuine_filename = _resolve_observation_filename(config.dataset_dir, config.metric)
     genuine_data = np.load(config.dataset_dir / genuine_filename)
     future_predictions = np.load(config.predict_dir / "future_predictions.npy")
 
