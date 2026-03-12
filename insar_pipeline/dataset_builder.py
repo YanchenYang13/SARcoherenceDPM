@@ -218,16 +218,28 @@ def calculate_std_from_cor(cor: np.ndarray, chunk_size: int = 50) -> np.ndarray:
 
 def save_dataset(output_subfolder: Path, timeseries: np.ndarray, dates: list[str], geninue_data: np.ndarray) -> None:
     output_subfolder.mkdir(parents=True, exist_ok=True)
+
+    # RNN canonical files
+    np.save(output_subfolder / "rnn_data.npy", timeseries)
+    np.save(output_subfolder / "rnn_data_std.npy", calculate_std_from_cor(timeseries))
+
+    # backward-compatible aliases
     np.save(output_subfolder / "data.npy", timeseries)
+    np.save(output_subfolder / "data_std.npy", calculate_std_from_cor(timeseries))
+
     with open(output_subfolder / "dates.pkl", "wb") as f:
         pickle.dump(dates, f)
 
+    # score-required observations (canonical + backward-compatible aliases)
+    np.save(output_subfolder / "score_observation.npy", geninue_data)
     np.save(output_subfolder / "geninue.npy", geninue_data)
-    np.save(output_subfolder / "data_std.npy", calculate_std_from_cor(timeseries))
 
     if geninue_data.ndim == 2:
         geninue_data = np.expand_dims(geninue_data, axis=-1)
-    np.save(output_subfolder / "geninue_std.npy", calculate_std_from_cor(geninue_data))
+
+    gen_std = calculate_std_from_cor(geninue_data)
+    np.save(output_subfolder / "score_observation_std.npy", gen_std)
+    np.save(output_subfolder / "geninue_std.npy", gen_std)
 
 
 def build_and_save_dataset(config: DatasetConfig) -> Path:
@@ -247,7 +259,7 @@ def build_and_save_dataset(config: DatasetConfig) -> Path:
     timeseries, dates = build_insar_timeseries_from_observations(train_observations)
     geninue_data = observations[-1][2]
 
-    output_subfolder = config.output_dir / "dataset"
+    output_subfolder = config.output_dir / "dataset_rnn"
     save_dataset(output_subfolder, timeseries, dates, geninue_data)
     if matrix_date_window:
         with open(output_subfolder / "matrix_dates.pkl", "wb") as f:

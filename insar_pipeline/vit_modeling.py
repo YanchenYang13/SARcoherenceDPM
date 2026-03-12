@@ -82,7 +82,8 @@ class MaskedDiagonalViT(nn.Module):
         # x: [B, 1, L, L]
         tokens = self.patch_embed(x).flatten(2).transpose(1, 2)
         cls = self.cls_token.expand(x.size(0), -1, -1)
-        tokens = torch.cat([cls, tokens], dim=1) + self.pos_embed[:, : tokens.size(1), :]
+        tokens = torch.cat([cls, tokens], dim=1)
+        tokens = tokens + self.pos_embed[:, : tokens.size(1), :]
         encoded = self.encoder(tokens)
         cls_out = encoded[:, 0]
         pred = self.reg_head(cls_out).squeeze(-1)
@@ -116,13 +117,19 @@ class ViTDatasetBuildConfig:
     matrix_mode: Literal["similarity", "outer", "difference"] = "similarity"
 
 
-def _load_data(dataset_dir: Path, metric: str) -> np.ndarray:
-    data_filename = "data_std.npy" if metric == "phase_std" else "data.npy"
-    return np.load(dataset_dir / data_filename).astype(np.float32)
+def _load_sequence_data(dataset_dir: Path, metric: str) -> np.ndarray:
+    candidates = ["rnn_data_std.npy", "data_std.npy"] if metric == "phase_std" else ["rnn_data.npy", "data.npy"]
+    for name in candidates:
+        path = dataset_dir / name
+        if path.exists():
+            return np.load(path).astype(np.float32)
+    raise FileNotFoundError(f"No sequence data found in {dataset_dir}. Tried: {candidates}")
+
+
 
 
 def build_and_save_vit_matrix_dataset(config: ViTDatasetBuildConfig) -> Path:
-    data = _load_data(config.dataset_dir, config.metric)
+    data = _load_sequence_data(config.dataset_dir, config.metric)
     base_ds = PixelMatrixDataset(data, is_prediction=True, matrix_mode=config.matrix_mode)
     matrices = np.zeros((base_ds.h, base_ds.w, base_ds.t, base_ds.t), dtype=np.float32)
 
@@ -132,11 +139,37 @@ def build_and_save_vit_matrix_dataset(config: ViTDatasetBuildConfig) -> Path:
 
     out_dir = config.output_dir / "vit_dataset"
     out_dir.mkdir(parents=True, exist_ok=True)
-    np.save(out_dir / "matrix_data.npy", matrices)
+    np.save(out_dir / "vit_matrix_data.npy", matrices)
+    np.save(out_dir / "matrix_data.npy", matrices)  # backward-compatible alias
+
     with open(config.dataset_dir / "dates.pkl", "rb") as f:
         dates = pickle.load(f)
     with open(out_dir / "dates.pkl", "wb") as f:
         pickle.dump(dates, f)
+
+    obs_name = "score_observation_std.npy" if config.metric == "phase_std" else "score_observation.npy"
+    obs_candidates = [obs_name, "geninue_std.npy" if config.metric == "phase_std" else "geninue.npy"]
+    for name in obs_candidates:
+        p = config.dataset_dir / name
+        if p.exists():
+            obs = np.load(p).astype(np.float32)
+            np.save(out_dir / obs_name, obs)
+            # backward-compatible alias
+            np.save(out_dir / ("geninue_std.npy" if config.metric == "phase_std" else "geninue.npy"), obs)
+            break
+
+    # copy sequence inputs so vit_train_predict can read from vit_dataset directly
+    seq_name = "rnn_data_std.npy" if config.metric == "phase_std" else "rnn_data.npy"
+    seq_alias = "data_std.npy" if config.metric == "phase_std" else "data.npy"
+    seq_candidates = [seq_name, seq_alias]
+    for name in seq_candidates:
+        p = config.dataset_dir / name
+        if p.exists():
+            seq = np.load(p).astype(np.float32)
+            np.save(out_dir / seq_name, seq)
+            np.save(out_dir / seq_alias, seq)
+            break
+
     return out_dir
 
 
@@ -154,7 +187,7 @@ def _apply_diag_mask(matrix: torch.Tensor, ratio: float) -> tuple[torch.Tensor, 
 
 
 def run_vit_training_and_prediction(config: ViTConfig) -> Path:
-    data = _load_data(config.dataset_dir, config.metric)
+    data = _load_sequence_data(config.dataset_dir, config.metric)
 
     train_ds = PixelMatrixDataset(data, is_prediction=False, matrix_mode=config.matrix_mode)
     train_size = int(0.8 * len(train_ds))

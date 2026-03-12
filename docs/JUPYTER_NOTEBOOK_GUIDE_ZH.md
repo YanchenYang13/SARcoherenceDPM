@@ -9,7 +9,7 @@
   2. GRU + 时间信息 + 普通 score（非 zscore）
   3. 时间矩阵 ViT + zscore
 
-> 说明：以下所有单元格都在仓库根目录执行（例如 `/workspace/SARcoherenceDPM`）。
+> 说明：以下所有单元格都在仓库根目录执行（你当前为 `/data6/WORKDIR/amatrice2025/merged/SARcoherenceDPM-main`）。
 
 ---
 
@@ -21,6 +21,7 @@
 import os
 from pathlib import Path
 
+REPO_DIR = Path('/data6/WORKDIR/amatrice2025/merged/SARcoherenceDPM-main')
 BASE_DIR = Path('/data6/WORKDIR/AmatriceSenDT22/merged/interferograms')
 CROPPED_DIR = BASE_DIR / 'cropped'
 GEOM_DIR = Path('/data6/WORKDIR/AmatriceSenDT22/merged/geom_reference')
@@ -30,9 +31,25 @@ EVENT_DATE = '20160824'
 SEQUENCE_LENGTH = 10
 MATRIX_SIZE = 10
 
+# ViT 参数（建议统一在这里改）
+VIT_PATCH_SIZE = 1
+VIT_DEPTH = 4
+
+RNN_DATASET_DIR = CROPPED_DIR / 'dataset_rnn'
+VIT_DATASET_DIR = CROPPED_DIR / 'vit_dataset'
+
+os.chdir(REPO_DIR)
+
+print('REPO_DIR =', REPO_DIR)
 print('BASE_DIR =', BASE_DIR)
 print('CROPPED_DIR =', CROPPED_DIR)
 print('GEOM_DIR =', GEOM_DIR)
+print('RNN_DATASET_DIR =', RNN_DATASET_DIR)
+print('VIT_DATASET_DIR =', VIT_DATASET_DIR)
+
+# ViT 关键约束：内部使用 seq_len = SEQUENCE_LENGTH - 1
+# 需满足：(SEQUENCE_LENGTH - 1) % VIT_PATCH_SIZE == 0
+print('ViT divisibility check =', (SEQUENCE_LENGTH - 1) % VIT_PATCH_SIZE)
 ```
 
 ### Cell 2：定义通用命令执行函数
@@ -87,9 +104,9 @@ run_cmd(
 ### Cell 5：检查数据集产物
 
 ```python
-dataset_dir = CROPPED_DIR / 'dataset'
+dataset_dir = RNN_DATASET_DIR
 print('Dataset dir:', dataset_dir)
-for name in ['data.npy', 'dates.pkl', 'matrix_dates.pkl', 'matrix_pairs.pkl']:
+for name in ['rnn_data.npy', 'score_observation.npy', 'dates.pkl', 'matrix_dates.pkl', 'matrix_pairs.pkl']:
     p = dataset_dir / name
     print(name, 'exists=', p.exists())
 ```
@@ -105,7 +122,7 @@ run_cmd(
     f"python -m insar_pipeline.app --step train_predict "
     f"--base-dir {BASE_DIR} "
     f"--output-dir {CROPPED_DIR} "
-    f"--dataset-dir {CROPPED_DIR / 'dataset'} "
+    f"--dataset-dir {RNN_DATASET_DIR} "
     f"--timeseries-metric coherence "
     f"--ts-model lstm "
     f"--use-zscore"
@@ -119,7 +136,7 @@ run_cmd(
     f"python -m insar_pipeline.app --step score "
     f"--base-dir {BASE_DIR} "
     f"--output-dir {CROPPED_DIR} "
-    f"--dataset-dir {CROPPED_DIR / 'dataset'} "
+    f"--dataset-dir {RNN_DATASET_DIR} "
     f"--predict-dir {CROPPED_DIR / 'predict'} "
     f"--timeseries-metric coherence "
     f"--use-zscore"
@@ -139,7 +156,7 @@ run_cmd(
     f"python -m insar_pipeline.app --step train_predict "
     f"--base-dir {BASE_DIR} "
     f"--output-dir {CROPPED_DIR} "
-    f"--dataset-dir {CROPPED_DIR / 'dataset'} "
+    f"--dataset-dir {RNN_DATASET_DIR} "
     f"--timeseries-metric coherence "
     f"--ts-model gru"
 )
@@ -152,7 +169,7 @@ run_cmd(
     f"python -m insar_pipeline.app --step score "
     f"--base-dir {BASE_DIR} "
     f"--output-dir {CROPPED_DIR} "
-    f"--dataset-dir {CROPPED_DIR / 'dataset'} "
+    f"--dataset-dir {RNN_DATASET_DIR} "
     f"--predict-dir {CROPPED_DIR / 'predict'} "
     f"--timeseries-metric coherence"
 )
@@ -169,11 +186,16 @@ run_cmd(
     f"python -m insar_pipeline.app --step vit_build_dataset "
     f"--base-dir {BASE_DIR} "
     f"--output-dir {CROPPED_DIR} "
-    f"--dataset-dir {CROPPED_DIR / 'dataset'} "
+    f"--dataset-dir {RNN_DATASET_DIR} "
     f"--timeseries-metric coherence "
     f"--vit-matrix-mode similarity"
 )
 ```
+
+> 说明：这一步会在 `{CROPPED_DIR}/vit_dataset` 下生成独立 ViT 数据集，包含：
+> `vit_matrix_data.npy`、`rnn_data.npy`、`score_observation.npy`、`dates.pkl`。
+> 从本版开始，Cell 11（训练）和 Cell 12（score）都使用 `--dataset-dir {VIT_DATASET_DIR}`，
+> 从目录与文件名层面彻底与 RNN 路径解耦，避免 `data.npy` 混淆。
 
 ### Cell 11：ViT 训练与预测
 
@@ -182,12 +204,25 @@ run_cmd(
     f"python -m insar_pipeline.app --step vit_train_predict "
     f"--base-dir {BASE_DIR} "
     f"--output-dir {CROPPED_DIR} "
-    f"--dataset-dir {CROPPED_DIR / 'dataset'} "
+    f"--dataset-dir {VIT_DATASET_DIR} "
     f"--timeseries-metric coherence "
     f"--vit-matrix-mode similarity "
-    f"--vit-patch-size 2 "
-    f"--vit-depth 4"
+    f"--vit-patch-size {VIT_PATCH_SIZE} "
+    f"--vit-depth {VIT_DEPTH}"
 )
+```
+
+> 若出现你遇到的 `RuntimeError: size of tensor a (...) must match tensor b (...)`，优先检查两点：
+> 1) 代码版本是否包含本次修复（`vit_modeling.py` 中先 `cat` 再加 `pos_embed`）；
+> 2) 参数是否满足 `(SEQUENCE_LENGTH - 1) % VIT_PATCH_SIZE == 0`。
+>    例如 `SEQUENCE_LENGTH=10` 时建议 `VIT_PATCH_SIZE=1/3/9`；若 `VIT_PATCH_SIZE=2`，则建议把 `SEQUENCE_LENGTH` 改为 `9/11/13/...`。
+
+### Cell 11.5：快速确认 ViT 产物（建议）
+
+```python
+print('vit_dataset exists =', VIT_DATASET_DIR.exists())
+print('rnn_data in vit_dataset exists =', (VIT_DATASET_DIR / 'rnn_data.npy').exists())
+print('predict file exists =', (CROPPED_DIR / 'predict' / 'future_predictions.npy').exists())
 ```
 
 ### Cell 12：score（zscore）
@@ -197,7 +232,7 @@ run_cmd(
     f"python -m insar_pipeline.app --step score "
     f"--base-dir {BASE_DIR} "
     f"--output-dir {CROPPED_DIR} "
-    f"--dataset-dir {CROPPED_DIR / 'dataset'} "
+    f"--dataset-dir {VIT_DATASET_DIR} "
     f"--predict-dir {CROPPED_DIR / 'predict'} "
     f"--timeseries-metric coherence "
     f"--use-zscore"
@@ -230,7 +265,7 @@ run_cmd(
 2. **快速调试**：
    - 先把 `SEQUENCE_LENGTH` 与 `MATRIX_SIZE` 设小一点，确认流程跑通后再增大。
 3. **显式检查输出**：
-   - 每跑完一条路径，检查 `future_predictions.npy`、`score.npy`、（zscore 分支下）`future_prediction_std.npy` 是否生成。
+   - 每跑完一条路径，检查 `future_predictions.npy`、`score.npy`、（zscore 分支下）`future_prediction_std.npy`（并确认其所在目录与当前路径对应：RNN 用 dataset_rnn，ViT 用 vit_dataset） 是否生成。
 
 ---
 
@@ -250,4 +285,3 @@ plt.title('Damage Proxy Score')
 plt.tight_layout()
 plt.show()
 ```
-

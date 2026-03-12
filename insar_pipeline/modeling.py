@@ -322,8 +322,16 @@ def _build_model(model_type: str) -> nn.Module:
     return InSARLSTM()
 
 
+
+def _resolve_timeseries_filename(dataset_dir: Path, metric: str) -> str:
+    candidates = ["rnn_data_std.npy", "data_std.npy"] if metric == "phase_std" else ["rnn_data.npy", "data.npy"]
+    for name in candidates:
+        if (dataset_dir / name).exists():
+            return name
+    raise FileNotFoundError(f"No timeseries dataset file found in {dataset_dir}. Tried: {candidates}")
+
 def run_training_and_prediction(config: TrainingConfig) -> Path:
-    data_filename = "data_std.npy" if config.metric == "phase_std" else "data.npy"
+    data_filename = _resolve_timeseries_filename(config.dataset_dir, config.metric)
     data = np.load(config.dataset_dir / data_filename)
     with open(config.dataset_dir / "dates.pkl", "rb") as f:
         dates = pickle.load(f)

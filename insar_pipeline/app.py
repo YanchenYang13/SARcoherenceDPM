@@ -82,7 +82,7 @@ def run_step(args: argparse.Namespace) -> None:
     if args.step == "train_predict":
         from .modeling import TrainingConfig, run_training_and_prediction
 
-        dataset_dir = args.dataset_dir or (args.output_dir / "dataset")
+        dataset_dir = args.dataset_dir or (args.output_dir / "dataset_rnn")
         predict_dir = run_training_and_prediction(
             TrainingConfig(
                 dataset_dir=dataset_dir,
@@ -104,7 +104,7 @@ def run_step(args: argparse.Namespace) -> None:
     if args.step == "score":
         from .scoring import ScoreConfig, compute_and_save_score
 
-        dataset_dir = args.dataset_dir or (args.output_dir / "dataset")
+        dataset_dir = args.dataset_dir or (args.output_dir / "dataset_rnn")
         predict_dir = args.predict_dir or (args.output_dir / "predict")
         score_path = compute_and_save_score(
             ScoreConfig(
@@ -154,7 +154,7 @@ def run_step(args: argparse.Namespace) -> None:
     if args.step == "vit_build_dataset":
         from .vit_modeling import ViTDatasetBuildConfig, build_and_save_vit_matrix_dataset
 
-        dataset_dir = args.dataset_dir or (args.output_dir / "dataset")
+        dataset_dir = args.dataset_dir or (args.output_dir / "dataset_rnn")
         vit_dataset_dir = build_and_save_vit_matrix_dataset(
             ViTDatasetBuildConfig(
                 dataset_dir=dataset_dir,
@@ -169,7 +169,7 @@ def run_step(args: argparse.Namespace) -> None:
     if args.step == "vit_train_predict":
         from .vit_modeling import ViTConfig, run_vit_training_and_prediction
 
-        dataset_dir = args.dataset_dir or (args.output_dir / "dataset")
+        dataset_dir = args.dataset_dir or (args.output_dir / "vit_dataset")
         predict_dir = run_vit_training_and_prediction(
             ViTConfig(
                 dataset_dir=dataset_dir,
