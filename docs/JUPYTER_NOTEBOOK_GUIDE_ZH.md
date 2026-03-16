@@ -119,6 +119,37 @@ run_cmd(
 )
 ```
 
+
+### Cell 3.6（可选）：运行 Jung et al. (2016) 时序退相干 CCD
+
+```python
+# 1) 由裁剪后的 *.slc.full 构建 ccd_dataset/slc_stack.npy
+run_cmd(
+    f"python -m insar_pipeline.app --step ccd_build_stack "
+    f"--base-dir {SLC_BASE_DIR} "
+    f"--geom-reference-dir {GEOM_DIR} "
+    f"--cropped-dir {SLC_CROPPED_DIR} "
+    f"--output-dir {SLC_CROPPED_DIR}"
+)
+
+# 2) 运行 CCD 概率图与变化图
+run_cmd(
+    f"python -m insar_pipeline.app --step ccd_run "
+    f"--output-dir {SLC_CROPPED_DIR} "
+    f"--dataset-dir {SLC_CROPPED_DIR / 'ccd_dataset'} "
+    f"--event-date {EVENT_DATE} "
+    f"--ccd-max-temporal-baseline 84 "
+    f"--ccd-threshold 0.75 "
+    f"--ccd-downsample 1 "
+    f"--ccd-artifact-prefix ccd_temporal"
+)
+```
+
+```python
+print((SLC_CROPPED_DIR / 'predict' / 'ccd_temporal_probability.npy').exists())
+print((SLC_CROPPED_DIR / 'predict' / 'ccd_temporal_change.npy').exists())
+```
+
 ### Cell 4：基于 `filt_fine.cor` 构建数据集
 
 ```python

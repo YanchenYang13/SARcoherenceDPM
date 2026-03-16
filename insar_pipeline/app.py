@@ -17,6 +17,9 @@ STEP_CHOICES = [
     "vit_build_dataset",
     "vit_train_predict",
     "vit_full",
+    "ccd_build_stack",
+    "ccd_run",
+    "ccd_full",
 ]
 
 
@@ -325,6 +328,79 @@ def run_step(args: argparse.Namespace) -> None:
             _kv(k, v)
         return
 
+
+    if args.step == "ccd_build_stack":
+        from .temporal_ccd import CCDBuildConfig, build_slc_stack_from_cropped
+
+        cropped_dir = args.cropped_dir or (args.base_dir / "cropped")
+        _kv("slc_cropped_dir", cropped_dir)
+        ccd_dataset_dir = build_slc_stack_from_cropped(
+            CCDBuildConfig(cropped_dir=cropped_dir, output_dir=args.output_dir)
+        )
+        _kv("ccd_dataset_dir", ccd_dataset_dir)
+        _kv("stack_file", ccd_dataset_dir / "slc_stack.npy")
+        return
+
+    if args.step == "ccd_run":
+        from .temporal_ccd import CCDConfig, run_temporal_ccd
+
+        dataset_dir = args.dataset_dir or (args.output_dir / "ccd_dataset")
+        _kv("ccd_dataset_dir", dataset_dir)
+        prob_path, change_path = run_temporal_ccd(
+            CCDConfig(
+                dataset_dir=dataset_dir,
+                output_dir=args.output_dir,
+                event_date=args.event_date,
+                max_temporal_baseline=args.ccd_max_temporal_baseline,
+                coherence_window_size=args.ccd_coherence_window_size,
+                envelope_bin_width=args.ccd_envelope_bin_width,
+                ccd_threshold=args.ccd_threshold,
+                kde_bandwidth=args.ccd_kde_bandwidth,
+                downsample=args.ccd_downsample,
+                artifact_prefix=args.ccd_artifact_prefix,
+            )
+        )
+        _kv("probability_map", prob_path)
+        _kv("change_map", change_path)
+        return
+
+    if args.step == "ccd_full":
+        from .preprocess import CropConfig, batch_crop_filt_fine_cor
+        from .temporal_ccd import CCDBuildConfig, CCDConfig, build_slc_stack_from_cropped, run_temporal_ccd
+
+        batch_crop_filt_fine_cor(
+            CropConfig(
+                base_path=args.base_dir,
+                geom_reference_path=args.geom_reference_dir,
+                output_base_path=args.cropped_dir,
+                lat_min=args.lat_min,
+                lat_max=args.lat_max,
+                lon_min=args.lon_min,
+                lon_max=args.lon_max,
+            )
+        )
+        ccd_dataset_dir = build_slc_stack_from_cropped(
+            CCDBuildConfig(cropped_dir=args.cropped_dir, output_dir=args.output_dir)
+        )
+        prob_path, change_path = run_temporal_ccd(
+            CCDConfig(
+                dataset_dir=ccd_dataset_dir,
+                output_dir=args.output_dir,
+                event_date=args.event_date,
+                max_temporal_baseline=args.ccd_max_temporal_baseline,
+                coherence_window_size=args.ccd_coherence_window_size,
+                envelope_bin_width=args.ccd_envelope_bin_width,
+                ccd_threshold=args.ccd_threshold,
+                kde_bandwidth=args.ccd_kde_bandwidth,
+                downsample=args.ccd_downsample,
+                artifact_prefix=args.ccd_artifact_prefix,
+            )
+        )
+        _kv("ccd_dataset_dir", ccd_dataset_dir)
+        _kv("probability_map", prob_path)
+        _kv("change_map", change_path)
+        return
+
     raise ValueError(f"Unsupported step: {args.step}")
 
 
@@ -402,6 +478,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lat-file", type=Path, default=None)
     parser.add_argument("--lon-file", type=Path, default=None)
     parser.add_argument("--subset-params", default="-l 42.625 42.635 -L 13.28 13.30")
+
+    parser.add_argument("--ccd-max-temporal-baseline", type=int, default=84)
+    parser.add_argument("--ccd-coherence-window-size", type=int, default=5)
+    parser.add_argument("--ccd-envelope-bin-width", type=int, default=12)
+    parser.add_argument("--ccd-kde-bandwidth", type=float, default=0.05)
+    parser.add_argument("--ccd-threshold", type=float, default=0.75)
+    parser.add_argument("--ccd-downsample", type=int, default=1)
+    parser.add_argument("--ccd-artifact-prefix", default="ccd_temporal")
 
     return parser
 

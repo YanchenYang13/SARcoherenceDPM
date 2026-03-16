@@ -113,6 +113,9 @@ Supported execution steps:
 - `full`
 - `vit_build_dataset`
 - `vit_train_predict`
+- `ccd_build_stack`
+- `ccd_run`
+- `ccd_full`
 
 ### End-to-End Orchestration
 
@@ -454,3 +457,27 @@ If this repository is used in operational or publication-oriented workflows, ple
 ## Related Notes
 
 This repository is intended to support **time-series-based InSAR damage assessment** workflows where post-event anomalies are interpreted relative to an expected no-disaster temporal baseline. It is particularly useful for studies that aim to move beyond simple two-date comparison and toward temporally informed post-event change interpretation.
+
+
+### Temporal Decorrelation CCD (Jung et al., 2016)
+
+For SLC-based temporal decorrelation CCD, run:
+
+```bash
+python -m insar_pipeline.app --step ccd_build_stack \
+  --base-dir /data6/WORKDIR/AmatriceSenDT22/merged/SLC \
+  --geom-reference-dir /data6/WORKDIR/AmatriceSenDT22/merged/geom_reference
+
+python -m insar_pipeline.app --step ccd_run \
+  --output-dir /data6/WORKDIR/AmatriceSenDT22/merged/SLC/cropped \
+  --event-date 20160824 \
+  --ccd-max-temporal-baseline 84 \
+  --ccd-threshold 0.75
+```
+
+Outputs are written into `predict/` as:
+- `ccd_temporal_probability.npy`
+- `ccd_temporal_change.npy`
+
+> For each `*.slc.full`, ensure ENVI physical file exists first (if only VRT exists):
+> `gdal_translate -of envi 20160821.slc.full.vrt 20160821.slc.full`
