@@ -209,6 +209,7 @@ def run_step(args: argparse.Namespace) -> None:
                 metric=args.timeseries_metric,
                 use_zscore=args.use_zscore,
                 artifact_prefix=prefix,
+                score_mode=args.score_mode,
             )
         )
         _kv("score_path", score_path)
@@ -473,6 +474,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-grad-norm", type=float, default=None)
 
     parser.add_argument("--score-filename", default="score.npy")
+    parser.add_argument("--score-mode", choices=["auto", "direct", "ndi", "zscore"], default="auto")
     parser.add_argument("--score-chunk-size", type=int, default=512)
 
     parser.add_argument("--lat-file", type=Path, default=None)

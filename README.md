@@ -343,6 +343,12 @@ Artifacts:
 
 * `score.npy` (or auto-prefixed `rnn_*_score.npy` / `vit_*_score.npy` by default in CLI runs)
 
+Score modes (`--score-mode`) are:
+- `direct`: direct difference. coherence uses `pred-obs`; phase_std uses `obs-pred`.
+- `ndi`: normalized difference index `(signed diff)/(obs+pred+eps)`.
+- `zscore`: `(signed diff)/pred_std`; requires `future_prediction_std.npy`.
+- `auto` (default): uses method-specific score if available (e.g., CCD probability map), otherwise `zscore` when `--use-zscore`, else `ndi`.
+
 Optional artifact in z-score branch:
 
 * `future_prediction_std.npy`
@@ -369,6 +375,7 @@ Available options:
 - `--sequence-length`: limit pre-event adjacent interferometric pairs used to build the time-series window.
 - `--matrix-size`: define the number of pre-event acquisition dates used for matrix-pair range filtering.
 - `--param-file`: JSON file to set dataset/RNN/ViT hyperparameters in one place (CLI values still override file values when explicitly set).
+- `--score-mode {auto,direct,ndi,zscore}`: select score construction rule.
 
 ViT extension options:
 

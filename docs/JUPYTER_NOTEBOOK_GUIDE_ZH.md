@@ -320,6 +320,28 @@ print('prefixed vit predict exists =', (CROPPED_DIR / 'predict' / f'{VIT_PREFIX}
 
 ### Cell 12：score（zscore）
 
+> `score` 支持四种模式：`direct`、`ndi`、`zscore`、`auto`。
+> - `direct`：直接差值（coherence: pred-obs；phase_std: obs-pred）
+> - `ndi`：归一化差值指数
+> - `zscore`：标准化差值（需预测标准差）
+> - `auto`：若方法自带 score（如 CCD 概率图）优先使用，否则按 zscore/ndi 自动选择。
+
+### Cell 12.1（可选）：score=direct（直接差值）
+
+```python
+run_cmd(
+    f"python -m insar_pipeline.app --step score "
+    f"--base-dir {BASE_DIR} "
+    f"--output-dir {CROPPED_DIR} "
+    f"--dataset-dir {RNN_DATASET_DIR} "
+    f"--predict-dir {CROPPED_DIR / 'predict'} "
+    f"--timeseries-metric coherence "
+    f"--score-mode direct"
+)
+```
+
+### Cell 12.2：score=zscore
+
 ```python
 run_cmd(
     f"python -m insar_pipeline.app --step score "
@@ -328,7 +350,8 @@ run_cmd(
     f"--dataset-dir {VIT_DATASET_DIR} "
     f"--predict-dir {CROPPED_DIR / 'predict'} "
     f"--timeseries-metric coherence "
-    f"--use-zscore"
+    f"--use-zscore "
+    f"--score-mode zscore"
 )
 ```
 
