@@ -100,6 +100,25 @@ run_cmd(
 )
 ```
 
+
+### Cell 3.5（可选）：裁剪 merged/SLC 下所有 `*.slc.full`
+
+> 注意：`20160821.slc.full` 需先由 `.vrt` 生成，例如：
+> `gdal_translate -of envi 20160821.slc.full.vrt 20160821.slc.full`
+
+```python
+SLC_BASE_DIR = Path('/data6/WORKDIR/AmatriceSenDT22/merged/SLC')
+SLC_CROPPED_DIR = SLC_BASE_DIR / 'cropped'
+
+run_cmd(
+    f"python -m insar_pipeline.app --step crop "
+    f"--base-dir {SLC_BASE_DIR} "
+    f"--geom-reference-dir {GEOM_DIR} "
+    f"--cropped-dir {SLC_CROPPED_DIR} "
+    f"--output-dir {SLC_CROPPED_DIR}"
+)
+```
+
 ### Cell 4：基于 `filt_fine.cor` 构建数据集
 
 ```python

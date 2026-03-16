@@ -165,6 +165,13 @@ python -m insar_pipeline.app --step crop \
   --geom-reference-dir /data6/WORKDIR/AmatriceSenDT22/merged/geom_reference
 ```
 
+Crop targets include `filt_fine.cor`, `fine.cor.full`, `filt_fine.int`, and `slc.full` (when present under `--base-dir`).
+
+For SLC (`*.slc.full`) workflows:
+- Ensure each `.slc.full` has been materialized from VRT first, e.g.
+  `gdal_translate -of envi 20160821.slc.full.vrt 20160821.slc.full`
+- Then set `--base-dir` to your SLC root (e.g. `/data6/WORKDIR/AmatriceSenDT22/merged/SLC`) and run `--step crop`.
+
 ### 2. Build Dataset (CRLB Example)
 
 ```bash
