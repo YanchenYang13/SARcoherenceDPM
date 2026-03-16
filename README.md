@@ -113,6 +113,9 @@ Supported execution steps:
 - `full`
 - `vit_build_dataset`
 - `vit_train_predict`
+- `ccd_build_stack`
+- `ccd_run`
+- `ccd_full`
 
 ### End-to-End Orchestration
 
@@ -165,6 +168,13 @@ python -m insar_pipeline.app --step crop \
   --geom-reference-dir /data6/WORKDIR/AmatriceSenDT22/merged/geom_reference
 ```
 
+Crop targets include `filt_fine.cor`, `fine.cor.full`, `filt_fine.int`, and `slc.full` (when present under `--base-dir`).
+
+For SLC (`*.slc.full`) workflows:
+- Ensure each `.slc.full` has been materialized from VRT first, e.g.
+  `gdal_translate -of envi 20160821.slc.full.vrt 20160821.slc.full`
+- Then set `--base-dir` to your SLC root (e.g. `/data6/WORKDIR/AmatriceSenDT22/merged/SLC`) and run `--step crop`.
+
 ### 2. Build Dataset (CRLB Example)
 
 ```bash
@@ -182,6 +192,15 @@ python -m insar_pipeline.app --step build_dataset \
 python -m insar_pipeline.app --step train_predict \
   --base-dir /data6/WORKDIR/AmatriceSenDT22/merged/interferograms \
   --output-dir /data6/WORKDIR/AmatriceSenDT22/merged/interferograms/cropped
+```
+
+You can externalize model/data hyperparameters via JSON:
+
+```bash
+python -m insar_pipeline.app --step train_predict \
+  --base-dir /data6/WORKDIR/AmatriceSenDT22/merged/interferograms \
+  --output-dir /data6/WORKDIR/AmatriceSenDT22/merged/interferograms/cropped \
+  --param-file configs/model_params.example.json
 ```
 
 ### 3b. Build ViT Temporal-Matrix Dataset
@@ -243,6 +262,10 @@ Reference notebook for prediction and DPM generation.
 ### `Part3_Output.ipynb`
 
 Reference notebook for geocoding and final output generation.
+
+### `docs/JUPYTER_NOTEBOOK_GUIDE_ZH.md`
+
+中文分步指南，面向在 **Jupyter Notebook** 中执行完整流程（含三条路径：LSTM+zscore、GRU+时间信息+普通score、ViT时间矩阵+zscore）。
 
 ---
 
@@ -308,6 +331,7 @@ In this branch:
   - coherence: `logit(coherence)`
   - phase_std: `phase_std -> coherence -> logit(coherence)`
 - prediction outputs `future_predictions.npy` (mean) and `future_prediction_std.npy` (std),
+- method-specific prefixed artifacts are also written (e.g., `rnn_*_future_predictions.npy`, `vit_*_future_predictions.npy`) to avoid cross-method overwrites,
 - scoring loads both files and writes metric-consistent z-score values.
 
 Masking policy:
@@ -317,7 +341,13 @@ Masking policy:
 
 Artifacts:
 
-* `score.npy`
+* `score.npy` (or auto-prefixed `rnn_*_score.npy` / `vit_*_score.npy` by default in CLI runs)
+
+Score modes (`--score-mode`) are:
+- `direct`: direct difference. coherence uses `pred-obs`; phase_std uses `obs-pred`.
+- `ndi`: normalized difference index `(signed diff)/(obs+pred+eps)`.
+- `zscore`: `(signed diff)/pred_std`; requires `future_prediction_std.npy`.
+- `auto` (default): uses method-specific score if available (e.g., CCD probability map), otherwise `zscore` when `--use-zscore`, else `ndi`.
 
 Optional artifact in z-score branch:
 
@@ -342,6 +372,10 @@ Available options:
 - `--ts-model {lstm,gru}`: choose the RNN backbone.
 - `--disable-timestamp`: disable date-derived time features from `dates.pkl`.
 - `--use-zscore`: enable logit + distribution prediction + z-score scoring.
+- `--sequence-length`: limit pre-event adjacent interferometric pairs used to build the time-series window.
+- `--matrix-size`: define the number of pre-event acquisition dates used for matrix-pair range filtering.
+- `--param-file`: JSON file to set dataset/RNN/ViT hyperparameters in one place (CLI values still override file values when explicitly set).
+- `--score-mode {auto,direct,ndi,zscore}`: select score construction rule.
 
 ViT extension options:
 
@@ -430,3 +464,27 @@ If this repository is used in operational or publication-oriented workflows, ple
 ## Related Notes
 
 This repository is intended to support **time-series-based InSAR damage assessment** workflows where post-event anomalies are interpreted relative to an expected no-disaster temporal baseline. It is particularly useful for studies that aim to move beyond simple two-date comparison and toward temporally informed post-event change interpretation.
+
+
+### Temporal Decorrelation CCD (Jung et al., 2016)
+
+For SLC-based temporal decorrelation CCD, run:
+
+```bash
+python -m insar_pipeline.app --step ccd_build_stack \
+  --base-dir /data6/WORKDIR/AmatriceSenDT22/merged/SLC \
+  --geom-reference-dir /data6/WORKDIR/AmatriceSenDT22/merged/geom_reference
+
+python -m insar_pipeline.app --step ccd_run \
+  --output-dir /data6/WORKDIR/AmatriceSenDT22/merged/SLC/cropped \
+  --event-date 20160824 \
+  --ccd-max-temporal-baseline 84 \
+  --ccd-threshold 0.75
+```
+
+Outputs are written into `predict/` as:
+- `ccd_temporal_probability.npy`
+- `ccd_temporal_change.npy`
+
+> For each `*.slc.full`, ensure ENVI physical file exists first (if only VRT exists):
+> `gdal_translate -of envi 20160821.slc.full.vrt 20160821.slc.full`
