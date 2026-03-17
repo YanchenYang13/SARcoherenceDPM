@@ -49,6 +49,7 @@ TARGET_FILE_PATTERNS: list[tuple[str, str]] = [
     ("filt_fine.cor", "filt_fine.cor"),
     ("fine.cor.full", "fine.cor.full"),
     ("filt_fine.int", "filt_fine.int"),
+    ("slc.full", "slc.full"),
 ]
 
 
