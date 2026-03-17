@@ -1,432 +1,108 @@
-# SARcoherenceDPM: An Open-Source, Research-Oriented Workflow for Rapid InSAR-Based Damage Proxy Mapping
+# SARcoherenceDPM
 
-## Overview
+SARcoherenceDPM is an open-source InSAR Damage Proxy Mapping (DPM) workflow for research and operational prototyping.  
+It provides a modular Python package + CLI pipeline that supports **RNN**, **ViT**, and **temporal CCD** paths.
 
-**SARcoherenceDPM** is an open-source workflow designed to make post-disaster damage assessment more efficient, reproducible, and extensible using multi-temporal **InSAR** observations.
+## Language Versions
 
-The repository formalizes a full **Damage Proxy Mapping (DPM)** pipeline into a modular codebase for research and operational experimentation, with emphasis on:
-
-- rapid end-to-end execution from cropped interferometric inputs to geocoded damage products,
-- interchangeable modeling paths (RNN and ViT) for temporal prediction under no-disaster assumptions,
-- metric-aware scoring strategies for coherence and phase-derived indicators,
-- and reusable CLI/programmatic interfaces that reduce notebook-only friction.
-
-At a high level, the workflow:
-
-- builds pixel-wise time series from interferometric products,
-- learns temporal patterns with sequence or matrix-based predictors,
-- estimates expected post-event behavior under a no-disaster baseline,
-- compares predicted and observed post-event signals,
-- and exports geocoded outputs for downstream mapping and interpretation.
-
-Compared with earlier notebook-centric workflows, this repository provides a modular Python package, **`insar_pipeline`**, with a step-wise CLI and reusable modules covering the full process:
-
-**crop → dataset → train/predict → score → output**
-
-In addition to the RNN time-series path, the repo now supports a **ViT-based DPM extension** for coherence/phase-std temporal matrix modeling:
-
-**crop → dataset → vit_build_dataset → vit_train_predict → score → output**
-
-
+- English project overview (this file): `README.md`
+- Chinese project overview: `README_ZH.md`
+- Chinese notebook operation guide: `docs/JUPYTER_NOTEBOOK_GUIDE_ZH.md`
+- English notebook operation guide: `docs/JUPYTER_NOTEBOOK_GUIDE_EN.md`
 
 ---
 
-## Scientific and Methodological Context
+## 1) Core Goals
 
-The DPM logic implemented in this repository follows the same core idea as the earlier workflow, while introducing improved modularity and implementation flexibility.
+The project standardizes the end-to-end post-event InSAR DPM workflow:
 
-### 1. Preprocessing and Interferometric Inputs
-
-- Start from co-registered multi-temporal SAR data and interferometric products.
-- Crop region-of-interest products together with geolocation rasters (`lat` / `lon`) to ensure downstream consistency.
-
-### 2. Time-Series Construction
-
-- Assemble chronological per-pixel sequences from interferogram-derived coherence or phase-STD-like signals.
-- Preserve temporal ordering and date features required by the prediction model.
-
-### 3. Prediction Baseline (LSTM)
-
-- Train an LSTM-based predictor on pre-event temporal behavior.
-- Produce expected post-event values under a **no-disaster baseline**.
-
-### 4. Damage Score Computation
-
-- Compare observed and predicted post-event values.
-- Use normalized-difference-style scoring to highlight anomalous changes.
-
-### 5. Geocoding and Export
-
-- Convert prediction and score products into geocoded outputs.
-- Subset to target bounding boxes and export final map products such as **GeoTIFF**.
+1. Build per-pixel temporal signals from interferometric products.
+2. Learn no-disaster temporal behavior with sequence/matrix models.
+3. Compare observed post-event signals against predictions.
+4. Export geocoded products for GIS analysis.
 
 ---
 
-## Input and Output Summary
+## 2) Feature Matrix
 
-### Input
-
-| Stage | Input Data | Description |
-|-------|------------|-------------|
-| Interferogram Generation | Registered multi-temporal SAR images | Co-registered Sentinel-1 stack covering pre- and post-event periods |
-| Time-Series Construction | Sequential interferograms | Pixel-wise interferogram-derived signals from adjacent date pairs |
-| Prediction Model | Pre-event sequences + timestamps | Chronologically arranged values with temporal context |
-
-### Output
-
-| Stage | Output Data | Description |
-|-------|-------------|-------------|
-| Time-Series Prediction | Hypothetical post-event signal | Predicted no-disaster baseline |
-| Damage Mapping | Continuous DPM score | Pixel-wise contrast between predicted and observed post-event values |
-| Final Delivery | Geocoded subset products | GIS-ready outputs for interpretation and analysis |
+| Capability | Description | CLI Step |
+|---|---|---|
+| Data cropping | Crop interferometric products and geolocation rasters | `crop` |
+| Dataset building | Build temporal datasets from `.cor` or ISCE `stack_int` | `build_dataset` |
+| RNN training/inference | LSTM/GRU with optional z-score branch | `train_predict` |
+| Score generation | `auto`, `direct`, `ndi`, `zscore` scoring modes | `score` |
+| Geocoded outputs | Geocode + subset + GeoTIFF export | `output` |
+| Post-output mask | Threshold masking on final TIFF products | `output --mask-enable` |
+| Visualization | Matplotlib or MintPy-style visualization | `visualize` |
+| ViT matrix path | ViT matrix dataset + train/predict | `vit_build_dataset`, `vit_train_predict` |
+| Full pipelines | One-command orchestration | `full`, `vit_full`, `ccd_full` |
+| Temporal CCD | Jung et al. (2016)-style temporal decorrelation CCD | `ccd_build_stack`, `ccd_run` |
 
 ---
 
-## Current Repository Capabilities
-
-The `insar_pipeline` package currently supports the following features.
-
-### Flexible Data Ingestion
-
-- **`input_source='cor'`**  
-  Read coherence directly from `.cor` files.
-
-- **`input_source='stack_int'`**  
-  Read ISCE stack interferograms (`.int`) and derive coherence-like products.
-
-### Multiple Coherence Paths for Stack Inputs
-
-- **`coherence_source='isce'`**
-- **`coherence_source='computed_phsig'`**
-- **`coherence_source='computed_crlb'`**
-
-### Step-Wise CLI Execution
-
-Supported execution steps:
-
-- `load_data`
-- `crop`
-- `build_dataset`
-- `train_predict`
-- `score`
-- `output`
-- `full`
-- `vit_build_dataset`
-- `vit_train_predict`
-
-### End-to-End Orchestration
-
-A programmatic helper is also provided in:
-
-- `insar_pipeline/pipeline.py`
-
-through the high-level function:
-
-- `run_full_pipeline(...)`
-
-### Output Chain
-
-The pipeline generates score products, geocodes them with MintPy tools, subsets them to the target area, and exports final raster outputs.
-
----
-
-## Package Structure
+## 3) Package Structure
 
 ```text
 insar_pipeline/
-├── app.py                # CLI entry point and argument parsing
-├── pipeline.py           # High-level full workflow orchestrator
-├── preprocess.py         # Cropping and target file collection
-├── dataset_builder.py    # Observation collection and dataset serialization
-├── isce_stack.py         # Stack pair discovery and .int access helpers
-├── coherence.py          # Coherence estimation and mapping utilities
-├── io_utils.py           # Raster read/write and bbox/index helpers
-├── modeling.py           # LSTM dataset/model/training/prediction
-├── vit_modeling.py       # ViT temporal-matrix dataset/model/training/prediction
+├── app.py                # CLI parser and step dispatcher
+├── pipeline.py           # High-level orchestration
+├── preprocess.py         # Cropping and file discovery
+├── dataset_builder.py    # Temporal dataset construction
+├── modeling.py           # RNN modeling (LSTM/GRU)
+├── vit_modeling.py       # ViT matrix modeling
 ├── scoring.py            # Score computation
-└── output_products.py    # Geocoded output generation
-````
+├── output_products.py    # Geocoding/export + threshold masking
+├── temporal_ccd.py       # Temporal decorrelation CCD
+└── visualization.py      # Matplotlib/MintPy visualization helper
+```
 
 ---
 
-## CLI Usage
-
-Show help information:
+## 4) Main CLI Steps
 
 ```bash
-python -m insar_pipeline.app -h
+python -m insar_pipeline.app --step <STEP> [args...]
 ```
 
-### 1. Crop
+Supported steps:
 
-```bash
-python -m insar_pipeline.app --step crop \
-  --base-dir /data6/WORKDIR/AmatriceSenDT22/merged/interferograms \
-  --geom-reference-dir /data6/WORKDIR/AmatriceSenDT22/merged/geom_reference
-```
+- `load_data`, `crop`, `build_dataset`, `train_predict`, `score`, `output`, `visualize`
+- `full`, `vit_build_dataset`, `vit_train_predict`, `vit_full`
+- `ccd_build_stack`, `ccd_run`, `ccd_full`
 
-### 2. Build Dataset (CRLB Example)
+---
 
-```bash
-python -m insar_pipeline.app --step build_dataset \
-  --base-dir /data6/WORKDIR/AmatriceSenDT22/merged/interferograms \
-  --output-dir /data6/WORKDIR/AmatriceSenDT22/merged/interferograms/cropped \
-  --input-source stack_int \
-  --stack-root /data6/WORKDIR/AmatriceSenDT22/merged/interferograms \
-  --coherence-source computed_crlb
-```
+## 5) Threshold Masking (New)
 
-### 3. Train and Predict
-
-```bash
-python -m insar_pipeline.app --step train_predict \
-  --base-dir /data6/WORKDIR/AmatriceSenDT22/merged/interferograms \
-  --output-dir /data6/WORKDIR/AmatriceSenDT22/merged/interferograms/cropped
-```
-
-### 3b. Build ViT Temporal-Matrix Dataset
-
-```bash
-python -m insar_pipeline.app --step vit_build_dataset \
-  --base-dir /data6/WORKDIR/AmatriceSenDT22/merged/interferograms \
-  --output-dir /data6/WORKDIR/AmatriceSenDT22/merged/interferograms/cropped \
-  --timeseries-metric coherence \
-  --vit-matrix-mode similarity
-```
-
-### 3c. ViT Train and Predict
-
-```bash
-python -m insar_pipeline.app --step vit_train_predict \
-  --base-dir /data6/WORKDIR/AmatriceSenDT22/merged/interferograms \
-  --output-dir /data6/WORKDIR/AmatriceSenDT22/merged/interferograms/cropped \
-  --timeseries-metric coherence \
-  --vit-matrix-mode similarity \
-  --vit-patch-size 2 \
-  --vit-depth 4
-```
-
-### 4. Score
-
-```bash
-python -m insar_pipeline.app --step score \
-  --base-dir /data6/WORKDIR/AmatriceSenDT22/merged/interferograms \
-  --output-dir /data6/WORKDIR/AmatriceSenDT22/merged/interferograms/cropped
-```
-
-### 5. Output (Geocode / Subset / Export)
+Threshold masking is applied to generated final TIFF products (and optional additional TIFF files):
 
 ```bash
 python -m insar_pipeline.app --step output \
-  --base-dir /data6/WORKDIR/AmatriceSenDT22/merged/interferograms \
-  --output-dir /data6/WORKDIR/AmatriceSenDT22/merged/interferograms/cropped \
-  --lat-file /data6/WORKDIR/AmatriceSenDT22/merged/interferograms/cropped/lat_cropped.rdr \
-  --lon-file /data6/WORKDIR/AmatriceSenDT22/merged/interferograms/cropped/lon_cropped.rdr
+  --output-dir /data/.../cropped \
+  --lat-file /data/.../cropped/lat_cropped.rdr \
+  --lon-file /data/.../cropped/lon_cropped.rdr \
+  --mask-enable \
+  --mask-method quantile \
+  --mask-quantile 0.70 \
+  --mask-output-suffix q70mask
 ```
 
----
+Three threshold methods are supported:
 
-## Notebooks in This Repository
+1. `manual`: `--mask-threshold-manual <value>`
+2. `quantile`: `--mask-quantile` (default `0.70`)
+3. `std`: threshold = `mean + n * std`, with `--mask-std-n` (default `2.0`)
 
-### `CRLB_InSAR_Workflow_Tutorial.ipynb`
-
-English tutorial focused on the **CRLB** path, including visualizations for generated artifacts such as `.npy` outputs using `matplotlib`.
-
-### `Part1_Input_Dataset_Construction.ipynb`
-
-Reference notebook for input preparation and dataset construction.
-
-### `Part2_Prediction_DPM_Generation.ipynb`
-
-Reference notebook for prediction and DPM generation.
-
-### `Part3_Output.ipynb`
-
-Reference notebook for geocoding and final output generation.
+You can include extra TIFF files via `--mask-input-tif file1.tif file2.tif`.
 
 ---
 
-## Detailed Workflow Notes
+## 6) Requirements
 
-This section connects the earlier notebook-style explanation with the current modular implementation.
+Typical runtime dependencies:
 
-### A. Data Preparation
+- `numpy`, `torch`, `matplotlib`
+- `osgeo.gdal`
+- MintPy tools (`geocode.py`, `subset.py`, `save_gdal.py`, `view.py`)
 
-* Multi-temporal SAR data are processed into interferometric products, typically through external InSAR stack toolchains such as **ISCE topsStack**.
-* This repository then crops the relevant interferometric files and geolocation rasters to the target area of interest.
-* Cropped `lat` / `lon` rasters are subsequently used during the geocoding stage.
-
-### B. Time-Series Modeling
-
-The dataset builder serializes intermediate artifacts such as:
-
-* `data.npy`
-* `data_std.npy`
-* `geninue.npy`
-* `geninue_std.npy`
-* `dates.pkl`
-
-The modeling module then trains an LSTM baseline and produces:
-
-* `future_predictions.npy`
-
-### C. Damage Proxy Scoring
-
-The scoring module supports two score branches and writes:
-
-#### 1) Normalized-index score (default, `use_zscore=False`)
-
-Let `obs` be the observed post-event map and `pred` be the predicted post-event map.
-
-- **phase_std mode** (`--timeseries-metric phase_std`):
-
-  ```text
-  score = (obs - pred) / (obs + pred + eps)
-  ```
-
-- **coherence mode** (`--timeseries-metric coherence`):
-
-  ```text
-  score = (pred - obs) / (obs + pred + eps)
-  ```
-
-  This is the sign-flipped form of the phase-std formula (numerator order swapped).
-
-#### 2) Z-score branch (`use_zscore=True`)
-
-When z-score mode is enabled, training/prediction switches to distribution prediction
-(mean + standard deviation), and scoring becomes metric-aware:
-
-```text
-phase_std: zscore = (obs - pred_mean) / (pred_std + eps)
-coherence: zscore = (pred_mean - obs) / (pred_std + eps)
-```
-
-In this branch:
-
-- model training applies metric-specific transform before sequence scaling:
-  - coherence: `logit(coherence)`
-  - phase_std: `phase_std -> coherence -> logit(coherence)`
-- prediction outputs `future_predictions.npy` (mean) and `future_prediction_std.npy` (std),
-- scoring loads both files and writes metric-consistent z-score values.
-
-Masking policy:
-
-- if either input pixel is NaN, score is NaN,
-- if either input pixel is 0, score is set to 0.
-
-Artifacts:
-
-* `score.npy`
-
-Optional artifact in z-score branch:
-
-* `future_prediction_std.npy`
-
----
-
-## New CLI Options for Time-Series and Scoring
-
-The CLI now supports configurable metric/model/time-feature/z-score behavior:
-
-```bash
-python -m insar_pipeline.app --step train_predict \
-  --timeseries-metric phase_std \
-  --ts-model lstm \
-  --use-zscore
-```
-
-Available options:
-
-- `--timeseries-metric {phase_std,coherence}`: choose sequence variable and score formula family.
-- `--ts-model {lstm,gru}`: choose the RNN backbone.
-- `--disable-timestamp`: disable date-derived time features from `dates.pkl`.
-- `--use-zscore`: enable logit + distribution prediction + z-score scoring.
-
-ViT extension options:
-
-- `--vit-matrix-mode {similarity,outer,difference}`: build temporal matrix from per-pixel sequence.
-- `--vit-patch-size`: patch size used by ViT patch embedding.
-- `--vit-hidden-dim`, `--vit-depth`, `--vit-heads`: ViT backbone size.
-- `--vit-diag-mask-ratio`, `--vit-diag-loss-weight`: masked-diagonal self-supervised controls.
-
-### D. Geospatial Output Generation
-
-The output module:
-
-* writes intermediate coherence-like rasters,
-* invokes geocoding and subsetting tools,
-* and exports final map products.
-
-> **Note**
-> This stage depends on a properly configured **MintPy / ISCE** runtime environment.
-
----
-
-## Typical Artifact Locations
-
-Common output locations include:
-
-* **Cropped files and geometry**:
-  `<output_dir>/`
-
-  Examples:
-
-  * `lat_cropped.rdr`
-  * `lon_cropped.rdr`
-
-* **Dataset artifacts**:
-  `<output_dir>/dataset/`
-
-* **Prediction and score artifacts**:
-  `<output_dir>/predict/`
-
----
-
-## Environment Requirements
-
-Common dependencies include:
-
-* `numpy`
-* `matplotlib`
-* `torch`
-* `GDAL` (`osgeo.gdal`)
-* MintPy utilities:
-
-  * `geocode.py`
-  * `subset.py`
-  * `save_gdal.py`
-  * `mintpy.utils.writefile`
-* ISCE-compatible inputs for stack-based workflows
-
-> **Note**
-> If these tools are unavailable, run the pipeline inside your configured **InSAR / MintPy** environment.
-
----
-
-## Recommended High-Level Workflow
-
-A typical end-to-end use pattern is:
-
-1. Prepare interferometric products and geometry files.
-2. Crop the region of interest.
-3. Build the time-series dataset.
-4. Train the LSTM predictor and generate post-event baseline predictions.
-5. Compute the DPM score.
-6. Geocode, subset, and export final GIS-ready products.
-
----
-
-## Acknowledgement
-
-If this repository is used in operational or publication-oriented workflows, please:
-
-* add an explicit project license,
-* acknowledge data sources appropriately,
-* and include attribution for upstream toolchains such as **ISCE** and **MintPy**.
-
----
-
-## Related Notes
-
-This repository is intended to support **time-series-based InSAR damage assessment** workflows where post-event anomalies are interpreted relative to an expected no-disaster temporal baseline. It is particularly useful for studies that aim to move beyond simple two-date comparison and toward temporally informed post-event change interpretation.
+Run this project in a configured InSAR/MintPy environment for full functionality.
