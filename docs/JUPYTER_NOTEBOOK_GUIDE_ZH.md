@@ -1,5 +1,7 @@
 # SARcoherenceDPM 全功能 Jupyter Notebook 指南（中文）
 
+> English version: `docs/JUPYTER_NOTEBOOK_GUIDE_EN.md`
+
 > 目标：用一个 Notebook 覆盖并验证本仓库 **已实现的主要功能**，包含：
 >
 > - 基础分步流程（`load_data/crop/build_dataset/train_predict/score/output/visualize`）
@@ -182,6 +184,40 @@ run_cmd(
     f"--output-dir {CROPPED_DIR} "
     f"--lat-file {CROPPED_DIR / 'lat_cropped.rdr'} "
     f"--lon-file {CROPPED_DIR / 'lon_cropped.rdr'}"
+)
+```
+
+### Cell 11.1：`output` + 阈值掩膜（三种模式）
+
+```python
+# A) 手动阈值
+run_cmd(
+    f"python -m insar_pipeline.app --step output "
+    f"--output-dir {CROPPED_DIR} "
+    f"--lat-file {CROPPED_DIR / 'lat_cropped.rdr'} "
+    f"--lon-file {CROPPED_DIR / 'lon_cropped.rdr'} "
+    f"--mask-enable --mask-method manual --mask-threshold-manual 0.30 "
+    f"--mask-output-suffix manual_mask"
+)
+
+# B) 分位数阈值（默认 70%）
+run_cmd(
+    f"python -m insar_pipeline.app --step output "
+    f"--output-dir {CROPPED_DIR} "
+    f"--lat-file {CROPPED_DIR / 'lat_cropped.rdr'} "
+    f"--lon-file {CROPPED_DIR / 'lon_cropped.rdr'} "
+    f"--mask-enable --mask-method quantile --mask-quantile 0.70 "
+    f"--mask-output-suffix q70_mask"
+)
+
+# C) 均值 + n*标准差（默认 n=2）
+run_cmd(
+    f"python -m insar_pipeline.app --step output "
+    f"--output-dir {CROPPED_DIR} "
+    f"--lat-file {CROPPED_DIR / 'lat_cropped.rdr'} "
+    f"--lon-file {CROPPED_DIR / 'lon_cropped.rdr'} "
+    f"--mask-enable --mask-method std --mask-std-n 2.0 "
+    f"--mask-output-suffix std2_mask"
 )
 ```
 

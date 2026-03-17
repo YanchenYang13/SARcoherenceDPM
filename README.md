@@ -1,260 +1,108 @@
 # SARcoherenceDPM
 
-一个面向研究与工程落地的 InSAR 灾损代理图（Damage Proxy Mapping, DPM）流程库。仓库把原本偏 Notebook 的流程整理为可复用的 Python 包与分步 CLI，支持 **RNN / ViT / CCD** 三类路径，并保留可视化与地理编码输出能力。
+SARcoherenceDPM is an open-source InSAR Damage Proxy Mapping (DPM) workflow for research and operational prototyping.  
+It provides a modular Python package + CLI pipeline that supports **RNN**, **ViT**, and **temporal CCD** paths.
+
+## Language Versions
+
+- English project overview (this file): `README.md`
+- Chinese project overview: `README_ZH.md`
+- Chinese notebook operation guide: `docs/JUPYTER_NOTEBOOK_GUIDE_ZH.md`
+- English notebook operation guide: `docs/JUPYTER_NOTEBOOK_GUIDE_EN.md`
 
 ---
 
-## 1. 项目目标
+## 1) Core Goals
 
-SARcoherenceDPM 关注以下问题：
+The project standardizes the end-to-end post-event InSAR DPM workflow:
 
-- 从多时相干涉产品构建像素级时间序列；
-- 在“无灾害基线”假设下预测震后期望值；
-- 将观测值与预测值比较，生成损伤代理分数；
-- 输出可用于 GIS 分析的地理编码产品。
-
-核心原则：**模块化、可复现、可扩展（不绑定单一模型/单一路径）**。
+1. Build per-pixel temporal signals from interferometric products.
+2. Learn no-disaster temporal behavior with sequence/matrix models.
+3. Compare observed post-event signals against predictions.
+4. Export geocoded products for GIS analysis.
 
 ---
 
-## 2. 功能全景（Feature Matrix）
+## 2) Feature Matrix
 
-| 模块 | 已实现能力 | 对应 CLI `--step` |
+| Capability | Description | CLI Step |
 |---|---|---|
-| 数据裁剪 | 裁剪 `cor/int/full` 与 `lat/lon` | `crop` |
-| 数据集构建 | `cor` 直读或 `stack_int` 推导相干性 | `build_dataset` |
-| 时序训练预测（RNN） | LSTM / GRU，支持时间特征与 zscore 分支 | `train_predict` |
-| 分数生成 | `auto/direct/ndi/zscore`，支持 metric-aware 符号 | `score` |
-| 地理编码输出 | geocode / subset / save_gdal 导出 | `output` |
-| 可视化 | matplotlib 与 MintPy `view.py` 风格 | `visualize` |
-| ViT 时序矩阵 | 矩阵构建 + 训练预测 | `vit_build_dataset`, `vit_train_predict` |
-| 全流程一键（RNN） | crop→dataset→train→score→output | `full` |
-| 全流程一键（ViT） | crop→dataset→vit train→score→output | `vit_full` |
-| 时序退相干 CCD | SLC 栈构建与变更检测（Jung et al., 2016） | `ccd_build_stack`, `ccd_run`, `ccd_full` |
+| Data cropping | Crop interferometric products and geolocation rasters | `crop` |
+| Dataset building | Build temporal datasets from `.cor` or ISCE `stack_int` | `build_dataset` |
+| RNN training/inference | LSTM/GRU with optional z-score branch | `train_predict` |
+| Score generation | `auto`, `direct`, `ndi`, `zscore` scoring modes | `score` |
+| Geocoded outputs | Geocode + subset + GeoTIFF export | `output` |
+| Post-output mask | Threshold masking on final TIFF products | `output --mask-enable` |
+| Visualization | Matplotlib or MintPy-style visualization | `visualize` |
+| ViT matrix path | ViT matrix dataset + train/predict | `vit_build_dataset`, `vit_train_predict` |
+| Full pipelines | One-command orchestration | `full`, `vit_full`, `ccd_full` |
+| Temporal CCD | Jung et al. (2016)-style temporal decorrelation CCD | `ccd_build_stack`, `ccd_run` |
 
 ---
 
-## 3. 代码结构
+## 3) Package Structure
 
 ```text
 insar_pipeline/
-├── app.py                # CLI 入口：参数解析与分步调度
-├── pipeline.py           # full / vit_full 高层编排
-├── preprocess.py         # 裁剪逻辑与文件搜集
-├── dataset_builder.py    # 时序样本构建与序列化
-├── isce_stack.py         # ISCE stack 对读取与索引
-├── coherence.py          # 相干性估计与映射工具
-├── modeling.py           # RNN(LSTM/GRU) 训练预测
-├── vit_modeling.py       # ViT 时序矩阵建模
-├── scoring.py            # score 计算
-├── output_products.py    # 地理编码产品导出
-├── temporal_ccd.py       # 时序退相干 CCD
-└── visualization.py      # matplotlib / MintPy 可视化
+├── app.py                # CLI parser and step dispatcher
+├── pipeline.py           # High-level orchestration
+├── preprocess.py         # Cropping and file discovery
+├── dataset_builder.py    # Temporal dataset construction
+├── modeling.py           # RNN modeling (LSTM/GRU)
+├── vit_modeling.py       # ViT matrix modeling
+├── scoring.py            # Score computation
+├── output_products.py    # Geocoding/export + threshold masking
+├── temporal_ccd.py       # Temporal decorrelation CCD
+└── visualization.py      # Matplotlib/MintPy visualization helper
 ```
 
 ---
 
-## 4. CLI 步骤总览
+## 4) Main CLI Steps
 
 ```bash
 python -m insar_pipeline.app --step <STEP> [args...]
 ```
 
-支持步骤：
+Supported steps:
 
-- `load_data`
-- `crop`
-- `build_dataset`
-- `train_predict`
-- `score`
-- `output`
-- `visualize`
-- `full`
-- `vit_build_dataset`
-- `vit_train_predict`
-- `vit_full`
-- `ccd_build_stack`
-- `ccd_run`
-- `ccd_full`
+- `load_data`, `crop`, `build_dataset`, `train_predict`, `score`, `output`, `visualize`
+- `full`, `vit_build_dataset`, `vit_train_predict`, `vit_full`
+- `ccd_build_stack`, `ccd_run`, `ccd_full`
 
 ---
 
-## 5. 典型流程（RNN 路径）
+## 5) Threshold Masking (New)
 
-### 5.1 裁剪
-
-```bash
-python -m insar_pipeline.app --step crop \
-  --base-dir /data/.../merged/interferograms \
-  --geom-reference-dir /data/.../merged/geom_reference
-```
-
-### 5.2 构建数据集
-
-```bash
-python -m insar_pipeline.app --step build_dataset \
-  --base-dir /data/.../merged/interferograms \
-  --output-dir /data/.../merged/interferograms/cropped \
-  --input-source cor
-```
-
-`--input-source stack_int` 时可再指定：
-
-- `--coherence-source isce`
-- `--coherence-source computed_phsig`
-- `--coherence-source computed_crlb`
-
-### 5.3 训练与预测
-
-```bash
-python -m insar_pipeline.app --step train_predict \
-  --output-dir /data/.../cropped \
-  --timeseries-metric phase_std \
-  --ts-model lstm \
-  --use-zscore
-```
-
-### 5.4 计算 score
-
-```bash
-python -m insar_pipeline.app --step score \
-  --output-dir /data/.../cropped \
-  --score-mode auto
-```
-
-### 5.5 地理编码输出
+Threshold masking is applied to generated final TIFF products (and optional additional TIFF files):
 
 ```bash
 python -m insar_pipeline.app --step output \
   --output-dir /data/.../cropped \
   --lat-file /data/.../cropped/lat_cropped.rdr \
-  --lon-file /data/.../cropped/lon_cropped.rdr
+  --lon-file /data/.../cropped/lon_cropped.rdr \
+  --mask-enable \
+  --mask-method quantile \
+  --mask-quantile 0.70 \
+  --mask-output-suffix q70mask
 ```
 
----
+Three threshold methods are supported:
 
-## 6. ViT 路径
+1. `manual`: `--mask-threshold-manual <value>`
+2. `quantile`: `--mask-quantile` (default `0.70`)
+3. `std`: threshold = `mean + n * std`, with `--mask-std-n` (default `2.0`)
 
-```bash
-python -m insar_pipeline.app --step vit_build_dataset \
-  --output-dir /data/.../cropped \
-  --timeseries-metric coherence \
-  --vit-matrix-mode similarity
-
-python -m insar_pipeline.app --step vit_train_predict \
-  --output-dir /data/.../cropped \
-  --timeseries-metric coherence \
-  --vit-matrix-mode similarity \
-  --vit-patch-size 2 \
-  --vit-depth 4
-
-python -m insar_pipeline.app --step score \
-  --dataset-dir /data/.../cropped/dataset_vit \
-  --output-dir /data/.../cropped \
-  --use-zscore
-```
+You can include extra TIFF files via `--mask-input-tif file1.tif file2.tif`.
 
 ---
 
-## 7. CCD 路径（Jung et al., 2016）
+## 6) Requirements
 
-```bash
-python -m insar_pipeline.app --step ccd_build_stack \
-  --base-dir /data/.../merged/SLC \
-  --geom-reference-dir /data/.../merged/geom_reference
+Typical runtime dependencies:
 
-python -m insar_pipeline.app --step ccd_run \
-  --output-dir /data/.../merged/SLC/cropped \
-  --event-date 20160824 \
-  --ccd-max-temporal-baseline 84 \
-  --ccd-threshold 0.75
-```
-
-会在 `predict/` 输出：
-
-- `ccd_temporal_probability.npy`
-- `ccd_temporal_change.npy`
-
-> 如果只有 `.slc.full.vrt`，请先转 ENVI 实体文件：
->
-> `gdal_translate -of envi 20160821.slc.full.vrt 20160821.slc.full`
-
-### `docs/JUPYTER_NOTEBOOK_GUIDE_ZH.md`
-
-中文分步指南，面向在 **Jupyter Notebook** 中执行完整流程（含三条路径：LSTM+zscore、GRU+时间信息+普通score、ViT时间矩阵+zscore）。
-
----
-
-## 8. 可视化
-
-### 8.1 matplotlib 后端
-
-```bash
-python -m insar_pipeline.app --step visualize \
-  --output-dir /data/.../cropped \
-  --visualize-input /data/.../cropped/predict/rnn_lstm_coherence_zscore_time_score.npy \
-  --visualize-mode matplotlib \
-  --visualize-output /data/.../cropped/predict/rnn_score.png \
-  --visualize-nodisplay
-```
-
-### 8.2 MintPy `view.py` 风格
-
-```bash
-python -m insar_pipeline.app --step visualize \
-  --visualize-input /data/.../merged/SLC/lon.rdr \
-  --visualize-mode mintpy \
-  --visualize-output /tmp/lon_view.png \
-  --visualize-nodisplay
-```
-
-不传 `--visualize-input` 时，CLI 会在 `predict/` 中按优先级自动选取：
-
-1. `*score.npy`
-2. `*_probability.npy`
-3. `*.npy`
-
----
-
-## 9. 参数文件（推荐）
-
-支持通过 JSON 统一管理参数，例如：`configs/model_params.example.json`。
-
-```bash
-python -m insar_pipeline.app --step train_predict \
-  --output-dir /data/.../cropped \
-  --param-file configs/model_params.example.json
-```
-
-参数文件可覆盖 `global / dataset / rnn / vit` 四个段落。
-
----
-
-## 10. 关键产物目录
-
-- 裁剪产物：`<output_dir>/`
-- 数据集产物：`<output_dir>/dataset_rnn` 或 `<output_dir>/dataset_vit`
-- 预测与分数：`<output_dir>/predict`
-- 地理编码导出：`<output_dir>/output`
-
----
-
-## 11. 文档导航
-
-- 中文全功能 Notebook 指南：`docs/JUPYTER_NOTEBOOK_GUIDE_ZH.md`
-- 示例参数文件：`configs/model_params.example.json`
-- 包入口与导出：`insar_pipeline/__init__.py`
-
----
-
-## 12. 运行环境
-
-常见依赖：
-
-- `numpy`
-- `matplotlib`
-- `torch`
+- `numpy`, `torch`, `matplotlib`
 - `osgeo.gdal`
-- MintPy（`geocode.py` / `subset.py` / `save_gdal.py` / `view.py`）
+- MintPy tools (`geocode.py`, `subset.py`, `save_gdal.py`, `view.py`)
 
-建议在已配置 InSAR/MintPy 的环境中运行。
+Run this project in a configured InSAR/MintPy environment for full functionality.

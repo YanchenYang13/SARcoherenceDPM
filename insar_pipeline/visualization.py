@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+"""Visualization helpers for quick artifact inspection.
+
+Supports two backends:
+- matplotlib: for common arrays and raster-like inputs
+- mintpy view.py: for MintPy-native visualization workflows
+"""
+
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -13,6 +20,7 @@ from .io_utils import read_isce_file
 
 @dataclass
 class VisualizationConfig:
+    """Configuration for one visualization request."""
     input_file: Path
     output_file: Path | None = None
     mode: Literal["auto", "mintpy", "matplotlib"] = "auto"
@@ -24,6 +32,7 @@ class VisualizationConfig:
 
 
 def _visualize_with_mintpy(config: VisualizationConfig) -> Path | None:
+    """Render using MintPy `view.py` CLI internals."""
     from mintpy.cli import view
 
     args: list[str] = [str(config.input_file)]
@@ -41,6 +50,7 @@ def _visualize_with_mintpy(config: VisualizationConfig) -> Path | None:
 
 
 def _read_2d_array(path: Path) -> np.ndarray:
+    """Read supported formats and return a 2D float32 array."""
     ext = path.suffix.lower()
     if ext == ".npy":
         arr = np.load(path)
@@ -60,6 +70,7 @@ def _read_2d_array(path: Path) -> np.ndarray:
 
 
 def _visualize_with_matplotlib(config: VisualizationConfig) -> Path | None:
+    """Render one 2D array with matplotlib and optional file export."""
     arr = _read_2d_array(config.input_file)
 
     plt.figure(figsize=(7, 6))
@@ -80,6 +91,7 @@ def _visualize_with_matplotlib(config: VisualizationConfig) -> Path | None:
 
 
 def visualize_file(config: VisualizationConfig) -> Path | None:
+    """Auto-select backend (or honor explicit backend) and render input file."""
     mode = config.mode
     if mode == "auto":
         if config.input_file.suffix.lower() in {".npy", ".tif", ".tiff", ".cor", ".rdr", ".full", ".int"}:

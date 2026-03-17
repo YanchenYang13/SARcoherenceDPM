@@ -1,5 +1,15 @@
 from __future__ import annotations
 
+"""Command-line entrypoint for the SARcoherenceDPM workflow.
+
+The parser exposes step-oriented sub-flows so users can run either:
+- isolated processing stages (crop/dataset/train/score/output/visualize), or
+- high-level orchestrations (full, vit_full, ccd_full).
+
+This file only wires configuration and control flow; core algorithms live in the
+specialized modules under `insar_pipeline/`.
+"""
+
 import argparse
 import json
 import datetime as dt
@@ -252,7 +262,12 @@ def run_step(args: argparse.Namespace) -> None:
         return
 
     if args.step == "output":
-        from .output_products import OutputConfig, generate_geocoded_outputs
+        from .output_products import (
+            OutputConfig,
+            ThresholdMaskConfig,
+            apply_threshold_mask_to_tif,
+            generate_geocoded_outputs,
+        )
 
         predict_dir = args.predict_dir or (args.output_dir / "predict")
         output_files = generate_geocoded_outputs(
@@ -266,6 +281,27 @@ def run_step(args: argparse.Namespace) -> None:
         print("  - output files:")
         for f in output_files:
             print(f"    * {f}")
+
+        if args.mask_enable:
+            # Threshold masking is an optional post-output enhancement applied on
+            # final TIFF products. It does not affect model/score internals.
+            mask_config = ThresholdMaskConfig(
+                method=args.mask_method,
+                manual_threshold=args.mask_threshold_manual,
+                quantile=args.mask_quantile,
+                std_n=args.mask_std_n,
+                output_suffix=args.mask_output_suffix,
+            )
+            # By default, mask all newly generated output TIFF files.
+            # Users may append extra external TIFF files via --mask-input-tif.
+            mask_targets = list(output_files)
+            if args.mask_input_tif:
+                mask_targets.extend(args.mask_input_tif)
+
+            print("  - masked files:")
+            for tif in mask_targets:
+                masked = apply_threshold_mask_to_tif(tif, mask_config)
+                print(f"    * {masked}")
         return
 
     if args.step == "full":
@@ -516,6 +552,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lat-file", type=Path, default=None)
     parser.add_argument("--lon-file", type=Path, default=None)
     parser.add_argument("--subset-params", default="-l 42.625 42.635 -L 13.28 13.30")
+
+    # Optional threshold-based post-processing for output TIFF maps.
+    parser.add_argument("--mask-enable", action="store_true", help="Apply threshold mask on output tif(s)")
+    parser.add_argument("--mask-input-tif", type=Path, nargs="*", default=None, help="Additional tif files to mask")
+    parser.add_argument("--mask-method", choices=["manual", "quantile", "std"], default="quantile")
+    parser.add_argument("--mask-threshold-manual", type=float, default=None)
+    parser.add_argument("--mask-quantile", type=float, default=0.70)
+    parser.add_argument("--mask-std-n", type=float, default=2.0)
+    parser.add_argument("--mask-output-suffix", default="mask")
 
     parser.add_argument("--visualize-input", type=Path, default=None)
     parser.add_argument("--visualize-output", type=Path, default=None)
