@@ -20,6 +20,7 @@ from .vit_modeling import (
     run_vit_training_and_prediction,
 )
 from .temporal_ccd import CCDBuildConfig, CCDConfig, build_slc_stack_from_cropped, run_temporal_ccd
+from .visualization import VisualizationConfig, visualize_file
 
 
 def app_main() -> None:
@@ -61,4 +62,6 @@ __all__ = [
     "CCDConfig",
     "build_slc_stack_from_cropped",
     "run_temporal_ccd",
+    "VisualizationConfig",
+    "visualize_file",
 ]

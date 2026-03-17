@@ -13,6 +13,7 @@ STEP_CHOICES = [
     "train_predict",
     "score",
     "output",
+    "visualize",
     "full",
     "vit_build_dataset",
     "vit_train_predict",
@@ -213,6 +214,41 @@ def run_step(args: argparse.Namespace) -> None:
             )
         )
         _kv("score_path", score_path)
+        return
+
+
+    if args.step == "visualize":
+        from .visualization import VisualizationConfig, visualize_file
+
+        if args.visualize_input is not None:
+            input_file = args.visualize_input
+        else:
+            predict_dir = args.predict_dir or (args.output_dir / "predict")
+            candidates = sorted(predict_dir.glob("*score.npy"))
+            if not candidates:
+                candidates = sorted(predict_dir.glob("*_probability.npy"))
+            if not candidates:
+                candidates = sorted(predict_dir.glob("*.npy"))
+            if not candidates:
+                raise FileNotFoundError(f"No visualization candidate found in {predict_dir}; pass --visualize-input")
+            input_file = candidates[-1]
+
+        _kv("visualize_input", input_file)
+        _kv("visualize_mode", args.visualize_mode)
+        out = visualize_file(
+            VisualizationConfig(
+                input_file=input_file,
+                output_file=args.visualize_output,
+                mode=args.visualize_mode,
+                cmap=args.visualize_cmap,
+                vmin=args.visualize_vmin,
+                vmax=args.visualize_vmax,
+                mintpy_dataset=args.visualize_dataset,
+                nodisplay=args.visualize_nodisplay,
+            )
+        )
+        if out is not None:
+            _kv("visualize_output", out)
         return
 
     if args.step == "output":
@@ -480,6 +516,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lat-file", type=Path, default=None)
     parser.add_argument("--lon-file", type=Path, default=None)
     parser.add_argument("--subset-params", default="-l 42.625 42.635 -L 13.28 13.30")
+
+    parser.add_argument("--visualize-input", type=Path, default=None)
+    parser.add_argument("--visualize-output", type=Path, default=None)
+    parser.add_argument("--visualize-mode", choices=["auto", "mintpy", "matplotlib"], default="auto")
+    parser.add_argument("--visualize-dataset", default=None, help="Optional dataset name for mintpy view")
+    parser.add_argument("--visualize-cmap", default="turbo")
+    parser.add_argument("--visualize-vmin", type=float, default=None)
+    parser.add_argument("--visualize-vmax", type=float, default=None)
+    parser.add_argument("--visualize-nodisplay", action="store_true")
 
     parser.add_argument("--ccd-max-temporal-baseline", type=int, default=84)
     parser.add_argument("--ccd-coherence-window-size", type=int, default=5)
