@@ -179,6 +179,10 @@ python -m insar_pipeline.app --step ccd_run \
 >
 > `gdal_translate -of envi 20160821.slc.full.vrt 20160821.slc.full`
 
+### `docs/JUPYTER_NOTEBOOK_GUIDE_ZH.md`
+
+中文分步指南，面向在 **Jupyter Notebook** 中执行完整流程（含三条路径：LSTM+zscore、GRU+时间信息+普通score、ViT时间矩阵+zscore）。
+
 ---
 
 ## 8. 可视化
