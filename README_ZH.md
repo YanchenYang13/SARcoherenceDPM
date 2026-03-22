@@ -25,6 +25,7 @@ SARcoherenceDPM 关注以下问题：
 |---|---|---|
 | 数据裁剪 | 裁剪 `cor/int/full` 与 `lat/lon` | `crop` |
 | 数据集构建 | `cor` 直读或 `stack_int` 推导相干性 | `build_dataset` |
+| INT 辅助产品 | 从裁剪后的 INT/COR 生成 `unfilt_fine.cor`、under-amp 产品与 `filt_fine.std` | `prepare_int_aux` |
 | 时序训练预测（RNN） | LSTM / GRU，支持时间特征与 zscore 分支 | `train_predict` |
 | 分数生成 | `auto/direct/ndi/zscore`，支持 metric-aware 符号 | `score` |
 | 地理编码输出 | geocode / subset / save_gdal 导出；支持阈值掩膜 | `output` |
@@ -66,6 +67,7 @@ python -m insar_pipeline.app --step <STEP> [args...]
 
 - `load_data`
 - `crop`
+- `prepare_int_aux`
 - `build_dataset`
 - `train_predict`
 - `score`

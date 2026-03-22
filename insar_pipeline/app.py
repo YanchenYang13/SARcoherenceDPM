@@ -19,6 +19,7 @@ from pathlib import Path
 STEP_CHOICES = [
     "load_data",
     "crop",
+    "prepare_int_aux",
     "build_dataset",
     "train_predict",
     "score",
@@ -55,6 +56,8 @@ def _build_dataset_config(args: argparse.Namespace):
         persist_computed_cor=args.persist_computed_cor,
         sequence_length=args.sequence_length,
         matrix_size=args.matrix_size,
+        observation_file=args.observation_file,
+        dataset_name=args.dataset_name,
     )
 
 
@@ -97,12 +100,18 @@ def _kv(key: str, value) -> None:
 def _artifact_prefix_for_rnn(args: argparse.Namespace) -> str:
     ztag = "zscore" if args.use_zscore else "raw"
     ttag = "time" if not args.disable_timestamp else "notime"
-    return f"rnn_{args.ts_model}_{args.timeseries_metric}_{ztag}_{ttag}"
+    base = f"rnn_{args.ts_model}_{args.timeseries_metric}_{ztag}_{ttag}"
+    if args.artifact_tag:
+        return f"{base}_{args.artifact_tag}"
+    return base
 
 
 def _artifact_prefix_for_vit(args: argparse.Namespace) -> str:
     ztag = "zscore" if args.use_zscore else "raw"
-    return f"vit_{args.vit_matrix_mode}_{args.timeseries_metric}_{ztag}_p{args.vit_patch_size}_d{args.vit_depth}"
+    base = f"vit_{args.vit_matrix_mode}_{args.timeseries_metric}_{ztag}_p{args.vit_patch_size}_d{args.vit_depth}"
+    if args.artifact_tag:
+        return f"{base}_{args.artifact_tag}"
+    return base
 
 
 def _default_score_filename(args: argparse.Namespace, dataset_dir: Path) -> str:
@@ -159,6 +168,25 @@ def run_step(args: argparse.Namespace) -> None:
             )
         )
         _kv("cropped_file_count", len(outputs))
+        return
+
+    if args.step == "prepare_int_aux":
+        from .int_auxiliary import IntAuxiliaryConfig, prepare_int_auxiliary_products
+
+        outputs = prepare_int_auxiliary_products(
+            IntAuxiliaryConfig(
+                cropped_dir=args.cropped_dir,
+                corr_win=args.aux_corr_win,
+                phsig_win=args.aux_phsig_win,
+                variance_win=args.aux_variance_win,
+                variance_looks=args.aux_variance_looks,
+                variance_block_lines=args.aux_block_lines,
+                output_var=args.aux_output_var,
+            )
+        )
+        _kv("prepared_aux_products", len(outputs))
+        for path in outputs:
+            print(f"    * {path}")
         return
 
     if args.step == "build_dataset":
@@ -502,6 +530,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--next-date", default="20160821_20160902")
 
     parser.add_argument("--input-source", choices=["cor", "stack_int"], default="cor")
+    parser.add_argument(
+        "--observation-file",
+        choices=[
+            "filt_fine.cor",
+            "fine.cor.full",
+            "unfilt_fine.cor",
+            "underamp_unfilt_fine.cor",
+            "underamp_unfilt_fine_circ.cor",
+            "filt_fine.std",
+        ],
+        default="filt_fine.cor",
+        help="Cropped observation product used when input_source=cor.",
+    )
     parser.add_argument("--stack-root", type=Path, default=None)
     parser.add_argument(
         "--coherence-source",
@@ -515,6 +556,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--persist-computed-cor", action="store_true", help="Persist computed coherence as .cor files.")
     parser.add_argument("--sequence-length", type=int, default=None, help="Number of nearest pre-event adjacent pairs to keep for time series.")
     parser.add_argument("--matrix-size", type=int, default=None, help="Number of pre-event acquisition dates used for matrix-pair filtering.")
+    parser.add_argument("--dataset-name", default=None, help="Optional dataset output folder name.")
+    parser.add_argument("--artifact-tag", default="", help="Optional suffix added to model/score artifact prefixes.")
+
+    parser.add_argument("--aux-corr-win", type=int, default=5, help="ICU PHASESIGMA correlation window for prepare_int_aux.")
+    parser.add_argument("--aux-phsig-win", type=int, default=5, help="ICU PHASESIGMA sigma window for prepare_int_aux.")
+    parser.add_argument("--aux-variance-win", type=int, default=5, help="Variance window for under-amplitude products.")
+    parser.add_argument("--aux-variance-looks", type=float, default=3.0, help="Looks factor used for Q/std conversion.")
+    parser.add_argument("--aux-block-lines", type=int, default=512, help="Block line count for under-amplitude generation.")
+    parser.add_argument("--aux-output-var", action="store_true", help="Also persist intermediate .var outputs for prepare_int_aux.")
 
     parser.add_argument("--lat-min", type=float, default=42.625)
     parser.add_argument("--lat-max", type=float, default=42.635)

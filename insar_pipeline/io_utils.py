@@ -48,10 +48,15 @@ def read_isce_file(file_path: str | Path) -> np.ndarray:
     Notes:
     - `.unw` uses band 2 for phase.
     - `.cor` prefers coherence band (band 2) if present, otherwise band 1.
+    - `.full` preserves all bands if more than one band is present.
     - `.int` keeps complex type (e.g., CFloat32) if present.
     """
     ds = _open_raster(file_path)
     ext = Path(file_path).suffix
+
+    if ext == ".full" and ds.RasterCount > 1:
+        bands = [ds.GetRasterBand(i + 1).ReadAsArray() for i in range(ds.RasterCount)]
+        return np.stack(bands, axis=2)
 
     if ext == ".unw":
         band_index = 2
@@ -167,6 +172,11 @@ def write_array_to_isce(arr: np.ndarray, output_filepath: str | Path) -> None:
     }
     if ext == ".rdr":
         # Keep geolocation rasters as single-band Float32 ENVI datasets.
+        write_gdal_file(np.asarray(arr, dtype=np.float32), output_filepath, data_type=gdal.GDT_Float32)
+        return
+
+    if ext == ".std":
+        # Phase-standard-deviation rasters are stored as single-band Float32 ENVI datasets.
         write_gdal_file(np.asarray(arr, dtype=np.float32), output_filepath, data_type=gdal.GDT_Float32)
         return
 

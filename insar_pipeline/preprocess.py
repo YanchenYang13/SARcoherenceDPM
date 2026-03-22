@@ -48,6 +48,7 @@ def _date_str_from_path(path: Path) -> str:
 TARGET_FILE_PATTERNS: list[tuple[str, str]] = [
     ("filt_fine.cor", "filt_fine.cor"),
     ("fine.cor.full", "fine.cor.full"),
+    ("fine.int", "fine.int"),
     ("filt_fine.int", "filt_fine.int"),
     ("slc.full", "slc.full"),
 ]

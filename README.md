@@ -29,6 +29,7 @@ The project standardizes the end-to-end post-event InSAR DPM workflow:
 |---|---|---|
 | Data cropping | Crop interferometric products and geolocation rasters | `crop` |
 | Dataset building | Build temporal datasets from `.cor` or ISCE `stack_int` | `build_dataset` |
+| INT auxiliaries | Generate `unfilt_fine.cor`, under-amplitude products, and `filt_fine.std` from cropped INT/COR files | `prepare_int_aux` |
 | RNN training/inference | LSTM/GRU with optional z-score branch | `train_predict` |
 | Score generation | `auto`, `direct`, `ndi`, `zscore` scoring modes | `score` |
 | Geocoded outputs | Geocode + subset + GeoTIFF export | `output` |
@@ -66,7 +67,7 @@ python -m insar_pipeline.app --step <STEP> [args...]
 
 Supported steps:
 
-- `load_data`, `crop`, `build_dataset`, `train_predict`, `score`, `output`, `visualize`
+- `load_data`, `crop`, `prepare_int_aux`, `build_dataset`, `train_predict`, `score`, `output`, `visualize`
 - `full`, `vit_build_dataset`, `vit_train_predict`, `vit_full`
 - `ccd_build_stack`, `ccd_run`, `ccd_full`
 
@@ -97,7 +98,41 @@ You can include extra TIFF files via `--mask-input-tif file1.tif file2.tif`.
 
 ---
 
-## 6) Requirements
+## 6) Paper Experiment Helpers
+
+The repository now includes an INT-derived auxiliary preparation step for paper experiments:
+
+```bash
+python -m insar_pipeline.app --step prepare_int_aux \
+  --cropped-dir /data/.../cropped \
+  --aux-variance-looks 3.0
+```
+
+This step prepares:
+
+- `*_unfilt_fine.cor`
+- `*_underamp_unfilt_fine.cor`
+- `*_underamp_unfilt_fine_circ.cor`
+- `*_filt_fine.std`
+
+You can then build source-specific datasets with:
+
+```bash
+python -m insar_pipeline.app --step build_dataset \
+  --cropped-dir /data/.../cropped \
+  --output-dir /data/.../cropped \
+  --input-source cor \
+  --observation-file underamp_unfilt_fine.cor \
+  --dataset-name dataset_rnn_underamp_unfilt_fine_cor
+```
+
+For the requested Amatrice paper workflow, use the dedicated notebook:
+
+- `docs/AMATRICE_PAPER_EXPERIMENT_GUIDE.ipynb`
+
+---
+
+## 7) Requirements
 
 Typical runtime dependencies:
 
