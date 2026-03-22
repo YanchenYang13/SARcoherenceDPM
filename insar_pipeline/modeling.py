@@ -277,7 +277,11 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
                 val_loss += loss.item() * x.size(0)
         val_loss /= len(val_loader.dataset)
 
-        print(f"[RNN][epoch {epoch + 1}/{num_epochs}] val_loss={val_loss:.6f} best={best_val_loss:.6f}")
+        print(
+            f"[RNN][epoch {epoch + 1}/{num_epochs}] "
+            f"train_loss={epoch_loss / max(len(train_loader), 1):.6f} "
+            f"val_loss={val_loss:.6f} best={best_val_loss:.6f}"
+        )
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             torch.save(model.state_dict(), "best_model.pth")
@@ -341,6 +345,14 @@ def _resolve_timeseries_filename(dataset_dir: Path, metric: str) -> str:
             return name
     raise FileNotFoundError(f"No timeseries dataset file found in {dataset_dir}. Tried: {candidates}")
 
+
+def _resolve_timeseries_filename(dataset_dir: Path, metric: str) -> str:
+    candidates = ["rnn_data_std.npy", "data_std.npy"] if metric == "phase_std" else ["rnn_data.npy", "data.npy"]
+    for name in candidates:
+        if (dataset_dir / name).exists():
+            return name
+    raise FileNotFoundError(f"No timeseries dataset file found in {dataset_dir}. Tried: {candidates}")
+
 def run_training_and_prediction(config: TrainingConfig) -> Path:
     data_filename = _resolve_timeseries_filename(config.dataset_dir, config.metric)
     data = np.load(config.dataset_dir / data_filename)
@@ -361,6 +373,21 @@ def run_training_and_prediction(config: TrainingConfig) -> Path:
     train_loader = DataLoader(train_dataset, batch_size=config.train_batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=config.train_batch_size, shuffle=False)
 
+    print("[RNN] Training configuration")
+    print(f"[RNN] dataset_dir={config.dataset_dir}")
+    print(f"[RNN] data_file={data_filename} shape={data.shape} metric={config.metric}")
+    print(
+        f"[RNN] model={config.model_type} use_timestamp={config.use_timestamp} "
+        f"use_zscore={config.use_zscore} hidden_dim={config.hidden_dim} "
+        f"num_layers={config.num_layers} dropout={config.dropout}"
+    )
+    print(
+        f"[RNN] epochs={config.epochs} train_batch_size={config.train_batch_size} "
+        f"pred_batch_size={config.pred_batch_size} lr={config.lr} optimizer={config.optimizer} "
+        f"weight_decay={config.weight_decay} max_grad_norm={config.max_grad_norm}"
+    )
+    print(f"[RNN] train_samples={len(train_dataset)} val_samples={len(val_dataset)}")
+
     base_model = _build_model(config)
     model = InSARDistributionHead(base_model) if config.use_zscore else base_model
     criterion = _normal_nll if config.use_zscore else nn.MSELoss()
@@ -369,6 +396,11 @@ def run_training_and_prediction(config: TrainingConfig) -> Path:
     else:
         optimizer = optim.Adam(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type == "cuda":
+        gpu_name = torch.cuda.get_device_name(0)
+        print(f"[RNN] device=cuda ({gpu_name})")
+    else:
+        print("[RNN] device=cpu (CUDA not available)")
 
     train_model(
         model,

@@ -203,6 +203,20 @@ def run_step(args: argparse.Namespace) -> None:
         prefix = _artifact_prefix_for_rnn(args)
         _kv("dataset_dir", dataset_dir)
         _kv("artifact_prefix", prefix)
+        _kv("model", args.ts_model)
+        _kv("metric", args.timeseries_metric)
+        _kv("timestamp", "enabled" if not args.disable_timestamp else "disabled")
+        _kv("device_policy", "cuda-if-available-else-cpu")
+        _kv("epochs", args.epochs)
+        _kv("train_batch_size", args.train_batch_size)
+        _kv("pred_batch_size", args.pred_batch_size)
+        _kv("lr", args.lr)
+        _kv("rnn_hidden_dim", args.rnn_hidden_dim)
+        _kv("rnn_num_layers", args.rnn_num_layers)
+        _kv("rnn_dropout", args.rnn_dropout)
+        _kv("optimizer", args.optimizer)
+        _kv("weight_decay", args.weight_decay)
+        _kv("max_grad_norm", args.max_grad_norm)
         predict_dir = run_training_and_prediction(
             TrainingConfig(
                 dataset_dir=dataset_dir,
