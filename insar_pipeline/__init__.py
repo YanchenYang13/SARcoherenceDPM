@@ -1,3 +1,5 @@
+__version__ = "0.3.0"
+
 from .coherence import (
     coh_crlb_from_std,
     coh_isce_phsig_from_std,
@@ -78,4 +80,5 @@ __all__ = [
     "run_temporal_ccd",
     "VisualizationConfig",
     "visualize_file",
+    "__version__",
 ]

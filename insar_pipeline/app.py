@@ -15,6 +15,8 @@ import json
 import datetime as dt
 from pathlib import Path
 
+from . import __version__
+
 
 STEP_CHOICES = [
     "load_data",
@@ -90,11 +92,11 @@ def _apply_param_overrides(args: argparse.Namespace, defaults: argparse.Namespac
 
 def _section(title: str) -> None:
     line = "=" * 64
-    print(f"\n{line}\n[STEP] {title}\n{line}")
+    print(f"\n{line}\n[SARcoherenceDPM v{__version__}] [STEP] {title}\n{line}", flush=True)
 
 
 def _kv(key: str, value) -> None:
-    print(f"  - {key}: {value}")
+    print(f"  - {key}: {value}", flush=True)
 
 
 def _artifact_prefix_for_rnn(args: argparse.Namespace) -> str:
