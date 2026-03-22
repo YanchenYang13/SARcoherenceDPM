@@ -1,3 +1,5 @@
+__version__ = "0.3.0"
+
 from .coherence import (
     coh_crlb_from_std,
     coh_isce_phsig_from_std,
@@ -8,6 +10,14 @@ from .coherence import (
 )
 from .dataset_builder import DatasetConfig, build_and_save_dataset, collect_pair_observations
 from .isce_stack import StackPairProduct, discover_stack_pair_products, read_isce_int
+from .int_auxiliary import (
+    IntAuxiliaryConfig,
+    coherence_to_phase_std,
+    convert_filtered_coherence_to_std,
+    generate_underamp_products,
+    generate_unfiltered_phsig_coherence,
+    prepare_int_auxiliary_products,
+)
 from .modeling import TrainingConfig, run_training_and_prediction
 from .output_products import OutputConfig, generate_geocoded_outputs
 from .pipeline import run_full_pipeline, run_full_vit_pipeline
@@ -19,6 +29,8 @@ from .vit_modeling import (
     build_and_save_vit_matrix_dataset,
     run_vit_training_and_prediction,
 )
+from .temporal_ccd import CCDBuildConfig, CCDConfig, build_slc_stack_from_cropped, run_temporal_ccd
+from .visualization import VisualizationConfig, visualize_file
 
 
 def app_main() -> None:
@@ -45,6 +57,12 @@ __all__ = [
     "StackPairProduct",
     "discover_stack_pair_products",
     "read_isce_int",
+    "IntAuxiliaryConfig",
+    "generate_unfiltered_phsig_coherence",
+    "generate_underamp_products",
+    "coherence_to_phase_std",
+    "convert_filtered_coherence_to_std",
+    "prepare_int_auxiliary_products",
     "estimate_coherence_from_int",
     "phase_std_linear",
     "phase_std_circular",
@@ -56,4 +74,11 @@ __all__ = [
     "ViTDatasetBuildConfig",
     "build_and_save_vit_matrix_dataset",
     "run_vit_training_and_prediction",
+    "CCDBuildConfig",
+    "CCDConfig",
+    "build_slc_stack_from_cropped",
+    "run_temporal_ccd",
+    "VisualizationConfig",
+    "visualize_file",
+    "__version__",
 ]
