@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime
 import pickle
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -238,17 +239,31 @@ def _normal_nll(mu: torch.Tensor, logvar: torch.Tensor, target: torch.Tensor) ->
     return (0.5 * (logvar + ((target - mu) ** 2) / var)).mean()
 
 
-def train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs=50, device="cpu", max_grad_norm: float | None = None):
+def train_model(
+    model,
+    train_loader,
+    val_loader,
+    criterion,
+    optimizer,
+    checkpoint_path: Path,
+    num_epochs=50,
+    device="cpu",
+    max_grad_norm: float | None = None,
+):
+    if isinstance(device, str):
+        device = torch.device(device)
     model.to(device)
     best_val_loss = float("inf")
 
     for epoch in range(num_epochs):
         model.train()
+        epoch_loss = 0.0
+        first_batch_logged = False
         for batch in train_loader:
-            x = batch["x"].to(device)
-            time_features = batch["time_features"].to(device)
-            target_time_features = batch["target_time_features"].to(device)
-            y = batch["y"].to(device)
+            x = batch["x"].to(device, non_blocking=device.type == "cuda")
+            time_features = batch["time_features"].to(device, non_blocking=device.type == "cuda")
+            target_time_features = batch["target_time_features"].to(device, non_blocking=device.type == "cuda")
+            y = batch["y"].to(device, non_blocking=device.type == "cuda")
 
             optimizer.zero_grad()
             outputs = model(x, time_features, target_time_features)
@@ -260,15 +275,23 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
             if max_grad_norm is not None and max_grad_norm > 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
             optimizer.step()
+            epoch_loss += loss.item()
+            if not first_batch_logged:
+                first_batch_logged = True
+                print(
+                    f"[RNN] first_train_batch device={x.device} "
+                    f"batch_shape={tuple(x.shape)} target_shape={tuple(y.shape)}",
+                    flush=True,
+                )
 
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
             for batch in val_loader:
-                x = batch["x"].to(device)
-                time_features = batch["time_features"].to(device)
-                target_time_features = batch["target_time_features"].to(device)
-                y = batch["y"].to(device)
+                x = batch["x"].to(device, non_blocking=device.type == "cuda")
+                time_features = batch["time_features"].to(device, non_blocking=device.type == "cuda")
+                target_time_features = batch["target_time_features"].to(device, non_blocking=device.type == "cuda")
+                y = batch["y"].to(device, non_blocking=device.type == "cuda")
                 outputs = model(x, time_features, target_time_features)
                 if isinstance(outputs, tuple):
                     loss = criterion(outputs[0], outputs[1], y)
@@ -280,11 +303,13 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
         print(
             f"[RNN][epoch {epoch + 1}/{num_epochs}] "
             f"train_loss={epoch_loss / max(len(train_loader), 1):.6f} "
-            f"val_loss={val_loss:.6f} best={best_val_loss:.6f}"
+            f"val_loss={val_loss:.6f} best={best_val_loss:.6f}",
+            flush=True,
         )
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            torch.save(model.state_dict(), "best_model.pth")
+            torch.save(model.state_dict(), checkpoint_path)
+            print(f"[RNN] saved_best_model={checkpoint_path}", flush=True)
 
     return model
 
@@ -337,6 +362,12 @@ def _build_model(config: TrainingConfig) -> nn.Module:
     return InSARLSTM(**model_kwargs)
 
 
+def _resolve_timeseries_filename(dataset_dir: Path, metric: str) -> str:
+    candidates = ["rnn_data_std.npy", "data_std.npy"] if metric == "phase_std" else ["rnn_data.npy", "data.npy"]
+    for name in candidates:
+        if (dataset_dir / name).exists():
+            return name
+    raise FileNotFoundError(f"No timeseries dataset file found in {dataset_dir}. Tried: {candidates}")
 
 def _resolve_timeseries_filename(dataset_dir: Path, metric: str) -> str:
     candidates = ["rnn_data_std.npy", "data_std.npy"] if metric == "phase_std" else ["rnn_data.npy", "data.npy"]
@@ -347,10 +378,13 @@ def _resolve_timeseries_filename(dataset_dir: Path, metric: str) -> str:
 
 def run_training_and_prediction(config: TrainingConfig) -> Path:
     data_filename = _resolve_timeseries_filename(config.dataset_dir, config.metric)
+    print(f"[RNN] loading_timeseries={config.dataset_dir / data_filename}", flush=True)
     data = np.load(config.dataset_dir / data_filename)
     with open(config.dataset_dir / "dates.pkl", "rb") as f:
         dates = pickle.load(f)
 
+    prep_start = time.perf_counter()
+    print("[RNN] preparing_dataset_scalers=start", flush=True)
     full_dataset = InSARDataset(
         data,
         dates,
@@ -358,27 +392,31 @@ def run_training_and_prediction(config: TrainingConfig) -> Path:
         use_zscore=config.use_zscore,
         metric=config.metric,
     )
+    print(f"[RNN] preparing_dataset_scalers=done elapsed_sec={time.perf_counter() - prep_start:.2f}", flush=True)
     train_size = int(0.8 * len(full_dataset))
     val_size = len(full_dataset) - train_size
     train_dataset, val_dataset = torch.utils.data.random_split(full_dataset, [train_size, val_size])
 
-    train_loader = DataLoader(train_dataset, batch_size=config.train_batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=config.train_batch_size, shuffle=False)
+    use_pin_memory = torch.cuda.is_available()
+    train_loader = DataLoader(train_dataset, batch_size=config.train_batch_size, shuffle=True, pin_memory=use_pin_memory)
+    val_loader = DataLoader(val_dataset, batch_size=config.train_batch_size, shuffle=False, pin_memory=use_pin_memory)
 
-    print("[RNN] Training configuration")
-    print(f"[RNN] dataset_dir={config.dataset_dir}")
-    print(f"[RNN] data_file={data_filename} shape={data.shape} metric={config.metric}")
+    print("[RNN] Training configuration", flush=True)
+    print(f"[RNN] dataset_dir={config.dataset_dir}", flush=True)
+    print(f"[RNN] data_file={data_filename} shape={data.shape} metric={config.metric}", flush=True)
     print(
         f"[RNN] model={config.model_type} use_timestamp={config.use_timestamp} "
         f"use_zscore={config.use_zscore} hidden_dim={config.hidden_dim} "
-        f"num_layers={config.num_layers} dropout={config.dropout}"
+        f"num_layers={config.num_layers} dropout={config.dropout}",
+        flush=True,
     )
     print(
         f"[RNN] epochs={config.epochs} train_batch_size={config.train_batch_size} "
         f"pred_batch_size={config.pred_batch_size} lr={config.lr} optimizer={config.optimizer} "
-        f"weight_decay={config.weight_decay} max_grad_norm={config.max_grad_norm}"
+        f"weight_decay={config.weight_decay} max_grad_norm={config.max_grad_norm}",
+        flush=True,
     )
-    print(f"[RNN] train_samples={len(train_dataset)} val_samples={len(val_dataset)}")
+    print(f"[RNN] train_samples={len(train_dataset)} val_samples={len(val_dataset)}", flush=True)
 
     base_model = _build_model(config)
     model = InSARDistributionHead(base_model) if config.use_zscore else base_model
@@ -390,9 +428,13 @@ def run_training_and_prediction(config: TrainingConfig) -> Path:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type == "cuda":
         gpu_name = torch.cuda.get_device_name(0)
-        print(f"[RNN] device=cuda ({gpu_name})")
+        print(f"[RNN] device=cuda ({gpu_name})", flush=True)
     else:
-        print("[RNN] device=cpu (CUDA not available)")
+        print("[RNN] device=cpu (CUDA not available)", flush=True)
+
+    predict_dir = config.output_dir / "predict"
+    predict_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = predict_dir / f"{config.artifact_prefix or 'rnn'}_best_model_training.pth"
 
     train_model(
         model,
@@ -400,11 +442,12 @@ def run_training_and_prediction(config: TrainingConfig) -> Path:
         val_loader,
         criterion,
         optimizer,
+        checkpoint_path=checkpoint_path,
         num_epochs=config.epochs,
         device=device,
         max_grad_norm=config.max_grad_norm,
     )
-    model.load_state_dict(torch.load("best_model.pth", map_location=device))
+    model.load_state_dict(torch.load(checkpoint_path, map_location=device))
 
     all_dates = dates + [config.next_date]
     predict_dataset = InSARDataset(
@@ -423,8 +466,6 @@ def run_training_and_prediction(config: TrainingConfig) -> Path:
         use_zscore=config.use_zscore,
     )
 
-    predict_dir = config.output_dir / "predict"
-    predict_dir.mkdir(parents=True, exist_ok=True)
     np.save(predict_dir / "future_predictions.npy", future_predictions)
     if config.artifact_prefix:
         np.save(predict_dir / f"{config.artifact_prefix}_future_predictions.npy", future_predictions)

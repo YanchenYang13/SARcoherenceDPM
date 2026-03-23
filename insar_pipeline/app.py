@@ -71,9 +71,9 @@ def _load_param_file(path: Path) -> dict:
     return data
 
 
-def _apply_param_overrides(args: argparse.Namespace, defaults: argparse.Namespace) -> None:
+def _apply_param_overrides(args: argparse.Namespace, defaults: argparse.Namespace) -> dict[str, tuple[object, object]]:
     if args.param_file is None:
-        return
+        return {}
 
     params = _load_param_file(args.param_file)
     merged: dict = {}
@@ -82,12 +82,16 @@ def _apply_param_overrides(args: argparse.Namespace, defaults: argparse.Namespac
         if isinstance(sec, dict):
             merged.update(sec)
 
+    applied: dict[str, tuple[object, object]] = {}
     for key, value in merged.items():
         arg_key = key.replace("-", "_")
         if not hasattr(args, arg_key):
             continue
         if getattr(args, arg_key) == getattr(defaults, arg_key):
+            old_value = getattr(args, arg_key)
             setattr(args, arg_key, value)
+            applied[arg_key] = (old_value, value)
+    return applied
 
 
 def _section(title: str) -> None:
@@ -205,6 +209,9 @@ def run_step(args: argparse.Namespace) -> None:
         prefix = _artifact_prefix_for_rnn(args)
         _kv("dataset_dir", dataset_dir)
         _kv("artifact_prefix", prefix)
+        _kv("param_file", args.param_file)
+        if getattr(args, "_param_overrides", None):
+            _kv("param_overrides", {k: new for k, (_, new) in args._param_overrides.items()})
         _kv("model", args.ts_model)
         _kv("metric", args.timeseries_metric)
         _kv("timestamp", "enabled" if not args.disable_timestamp else "disabled")
@@ -652,7 +659,7 @@ def main() -> None:
     parser = build_parser()
     defaults = parser.parse_args([])
     args = parser.parse_args()
-    _apply_param_overrides(args, defaults)
+    args._param_overrides = _apply_param_overrides(args, defaults)
 
     if args.cropped_dir is None:
         args.cropped_dir = args.base_dir / "cropped"
