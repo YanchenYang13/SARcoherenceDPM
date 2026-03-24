@@ -362,6 +362,19 @@ def _build_model(config: TrainingConfig) -> nn.Module:
     return InSARLSTM(**model_kwargs)
 
 
+def _resolve_timeseries_filename(dataset_dir: Path, metric: str) -> str:
+    candidates = ["rnn_data_std.npy", "data_std.npy"] if metric == "phase_std" else ["rnn_data.npy", "data.npy"]
+    for name in candidates:
+        if (dataset_dir / name).exists():
+            return name
+    raise FileNotFoundError(f"No timeseries dataset file found in {dataset_dir}. Tried: {candidates}")
+
+def _resolve_timeseries_filename(dataset_dir: Path, metric: str) -> str:
+    candidates = ["rnn_data_std.npy", "data_std.npy"] if metric == "phase_std" else ["rnn_data.npy", "data.npy"]
+    for name in candidates:
+        if (dataset_dir / name).exists():
+            return name
+    raise FileNotFoundError(f"No timeseries dataset file found in {dataset_dir}. Tried: {candidates}")
 
 def _resolve_timeseries_filename(dataset_dir: Path, metric: str) -> str:
     candidates = ["rnn_data_std.npy", "data_std.npy"] if metric == "phase_std" else ["rnn_data.npy", "data.npy"]
