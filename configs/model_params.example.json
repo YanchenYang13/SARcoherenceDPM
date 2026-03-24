@@ -1,0 +1,37 @@
+{
+  "dataset": {
+    "sequence_length": 12,
+    "matrix_size": 12
+  },
+  "rnn": {
+    "ts_model": "gru",
+    "use_zscore": true,
+    "rnn_hidden_dim": 128,
+    "rnn_num_layers": 2,
+    "rnn_dropout": 0.2,
+    "epochs": 30,
+    "train_batch_size": 256,
+    "pred_batch_size": 512,
+    "lr": 0.0005,
+    "optimizer": "adamw",
+    "weight_decay": 0.0001,
+    "max_grad_norm": 1.0
+  },
+  "vit": {
+    "timeseries_metric": "coherence",
+    "use_zscore": true,
+    "vit_matrix_mode": "similarity",
+    "vit_patch_size": 1,
+    "vit_hidden_dim": 128,
+    "vit_depth": 6,
+    "vit_heads": 8,
+    "vit_diag_mask_ratio": 0.5,
+    "vit_diag_loss_weight": 0.3,
+    "epochs": 30,
+    "train_batch_size": 256,
+    "pred_batch_size": 512,
+    "lr": 0.0005,
+    "optimizer": "adamw",
+    "weight_decay": 0.0001
+  }
+}

@@ -7,9 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+from osgeo import gdal
 
 from .coherence import estimate_coherence_from_int, write_isce_bip_cor
-from .io_utils import read_isce_cor
+from .io_utils import read_isce_cor, read_isce_file
 from .isce_stack import discover_stack_pair_products
 
 
@@ -27,21 +28,126 @@ class DatasetConfig:
     std_thresh: float = 1.0
     use_circular_std: bool = True
     persist_computed_cor: bool = False
+    sequence_length: int | None = None
+    matrix_size: int | None = None
+    observation_file: str = "filt_fine.cor"
+    dataset_name: str | None = None
+    save_legacy_aliases: bool = True
+
+
+def _observation_metric(observation_file: str) -> str:
+    return "phase_std" if observation_file.endswith(".std") else "coherence"
 
 
 def _date_to_dt(date_str: str) -> dt.datetime:
     return dt.datetime.strptime(date_str.split("_")[0], "%Y%m%d")
 
 
-def find_cor_files_sorted(cropped_dir: Path) -> list[tuple[dt.datetime, str, Path]]:
+def parse_date_pair(date_pair: str) -> tuple[dt.datetime, dt.datetime]:
+    master_str, slave_str = date_pair.split("_")
+    return dt.datetime.strptime(master_str, "%Y%m%d"), dt.datetime.strptime(slave_str, "%Y%m%d")
+
+
+def filter_adjacent_pairs(
+    observations: list[tuple[dt.datetime, str, np.ndarray]],
+) -> list[tuple[dt.datetime, str, np.ndarray]]:
+    adjacent: list[tuple[dt.datetime, str, np.ndarray]] = []
+    for obs in observations:
+        _, date_pair, _ = obs
+        master_dt, slave_dt = parse_date_pair(date_pair)
+        if (slave_dt - master_dt).days <= 13:
+            adjacent.append(obs)
+    return adjacent
+
+
+def select_adjacent_sequence_window(
+    observations: list[tuple[dt.datetime, str, np.ndarray]],
+    reference_date: dt.datetime,
+    sequence_length: int | None,
+) -> list[tuple[dt.datetime, str, np.ndarray]]:
+    pre_event_adjacent = [
+        obs for obs in filter_adjacent_pairs(observations) if parse_date_pair(obs[1])[1] < reference_date
+    ]
+    pre_event_adjacent.sort(key=lambda x: parse_date_pair(x[1])[1], reverse=True)
+    if sequence_length is not None:
+        if sequence_length < 1:
+            raise ValueError("sequence_length must be >= 1")
+        pre_event_adjacent = pre_event_adjacent[:sequence_length]
+    return sorted(pre_event_adjacent, key=lambda x: parse_date_pair(x[1])[1])
+
+
+def select_matrix_pair_window(
+    observations: list[tuple[dt.datetime, str, np.ndarray]],
+    reference_date: dt.datetime,
+    matrix_size: int | None,
+) -> tuple[list[str], list[tuple[dt.datetime, str, np.ndarray]]]:
+    if matrix_size is None:
+        return [], []
+    if matrix_size < 1:
+        raise ValueError("matrix_size must be >= 1")
+
+    acquisition_dates = sorted(
+        {
+            d
+            for _, date_pair, _ in observations
+            for d in parse_date_pair(date_pair)
+            if d < reference_date
+        }
+    )
+    selected_dates = acquisition_dates[-matrix_size:]
+    selected_set = set(selected_dates)
+    matrix_observations = [
+        obs
+        for obs in observations
+        if all(d in selected_set for d in parse_date_pair(obs[1]))
+    ]
+    selected_date_str = [d.strftime("%Y%m%d") for d in selected_dates]
+    return selected_date_str, sorted(matrix_observations, key=lambda x: parse_date_pair(x[1]))
+
+
+def _find_observation_files_sorted(cropped_dir: Path, observation_file: str) -> list[tuple[dt.datetime, str, Path]]:
     file_infos = []
-    for path in cropped_dir.rglob("*filt_fine.cor"):
+    pattern = f"*{observation_file}"
+    for path in cropped_dir.rglob(pattern):
         m = re.search(r"(\d{8}_\d{8})", path.name)
         if not m:
             continue
         date_str = m.group(1)
         file_infos.append((_date_to_dt(date_str), date_str, path))
     return sorted(file_infos, key=lambda x: x[0])
+
+
+def find_cor_files_sorted(cropped_dir: Path) -> list[tuple[dt.datetime, str, Path]]:
+    return _find_observation_files_sorted(cropped_dir, "filt_fine.cor")
+
+
+def _read_full_coherence_band(path: Path) -> np.ndarray:
+    ds = gdal.Open(str(path), gdal.GA_ReadOnly)
+    if ds is None:
+        raise FileNotFoundError(f"Cannot open raster: {path}")
+    if ds.RasterCount < 2:
+        raise ValueError(f"{path} does not expose a second band for coherence.")
+    band = ds.GetRasterBand(2)
+    data = band.ReadAsArray()
+    if data is None:
+        raise RuntimeError(f"Cannot read coherence band from {path}")
+    return data.astype(np.float32)
+
+
+def _read_observation_array(path: Path, observation_file: str) -> np.ndarray:
+    if observation_file == "fine.cor.full":
+        return _read_full_coherence_band(path)
+    if observation_file.endswith(".cor"):
+        return read_isce_cor(path)
+    data = read_isce_file(path)
+    if data.ndim == 3:
+        data = data[:, :, 0]
+    return data.astype(np.float32)
+
+
+def _default_dataset_name(observation_file: str) -> str:
+    sanitized = observation_file.replace(".", "_")
+    return f"dataset_rnn_{sanitized}"
 
 
 
@@ -63,8 +169,8 @@ def collect_pair_observations(config: DatasetConfig) -> list[tuple[dt.datetime, 
     observations: list[tuple[dt.datetime, str, np.ndarray]] = []
 
     if config.input_source == "cor":
-        for start_dt, date_str, path in find_cor_files_sorted(config.cropped_dir):
-            coh = read_isce_cor(path)
+        for start_dt, date_str, path in _find_observation_files_sorted(config.cropped_dir, config.observation_file):
+            coh = _read_observation_array(path, config.observation_file)
             observations.append((start_dt, date_str, coh))
         return observations
 
@@ -152,27 +258,92 @@ def calculate_std_from_cor(cor: np.ndarray, chunk_size: int = 50) -> np.ndarray:
     return result
 
 
-def save_dataset(output_subfolder: Path, timeseries: np.ndarray, dates: list[str], geninue_data: np.ndarray) -> None:
+def _phase_std_to_coherence_from_looks(phase_std: np.ndarray, looks: float) -> np.ndarray:
+    denom = np.sqrt(1.0 + 2.0 * float(looks) * (phase_std.astype(np.float32) ** 2))
+    coh = 1.0 / np.maximum(denom, 1e-8)
+    coh = np.where(np.isnan(phase_std), np.nan, np.where(phase_std == 0, 0.0, coh))
+    return coh.astype(np.float32)
+
+
+def save_dataset(
+    output_subfolder: Path,
+    timeseries: np.ndarray,
+    dates: list[str],
+    geninue_data: np.ndarray,
+    data_mode: str = "coherence",
+    looks: float = 3.0,
+    save_legacy_aliases: bool = True,
+) -> None:
     output_subfolder.mkdir(parents=True, exist_ok=True)
-    np.save(output_subfolder / "data.npy", timeseries)
+
+    if data_mode == "phase_std":
+        coherence_timeseries = _phase_std_to_coherence_from_looks(timeseries, looks)
+        coherence_observation = _phase_std_to_coherence_from_looks(geninue_data, looks)
+
+        np.save(output_subfolder / "rnn_data.npy", coherence_timeseries)
+        np.save(output_subfolder / "rnn_data_std.npy", timeseries)
+        np.save(output_subfolder / "score_observation.npy", coherence_observation)
+        np.save(output_subfolder / "score_observation_std.npy", np.expand_dims(geninue_data, axis=-1) if geninue_data.ndim == 2 else geninue_data)
+        if save_legacy_aliases:
+            np.save(output_subfolder / "data.npy", coherence_timeseries)
+            np.save(output_subfolder / "data_std.npy", timeseries)
+            np.save(output_subfolder / "geninue.npy", coherence_observation)
+            np.save(output_subfolder / "geninue_std.npy", np.expand_dims(geninue_data, axis=-1) if geninue_data.ndim == 2 else geninue_data)
+    else:
+        timeseries_std = calculate_std_from_cor(timeseries)
+        # RNN canonical files
+        np.save(output_subfolder / "rnn_data.npy", timeseries)
+        np.save(output_subfolder / "rnn_data_std.npy", timeseries_std)
+
+        # score-required observations
+        np.save(output_subfolder / "score_observation.npy", geninue_data)
+
+        if geninue_data.ndim == 2:
+            geninue_data = np.expand_dims(geninue_data, axis=-1)
+
+        gen_std = calculate_std_from_cor(geninue_data)
+        np.save(output_subfolder / "score_observation_std.npy", gen_std)
+        if save_legacy_aliases:
+            # backward-compatible aliases
+            np.save(output_subfolder / "data.npy", timeseries)
+            np.save(output_subfolder / "data_std.npy", timeseries_std)
+            np.save(output_subfolder / "geninue.npy", geninue_data)
+            np.save(output_subfolder / "geninue_std.npy", gen_std)
+
     with open(output_subfolder / "dates.pkl", "wb") as f:
         pickle.dump(dates, f)
-
-    np.save(output_subfolder / "geninue.npy", geninue_data)
-    np.save(output_subfolder / "data_std.npy", calculate_std_from_cor(timeseries))
-
-    if geninue_data.ndim == 2:
-        geninue_data = np.expand_dims(geninue_data, axis=-1)
-    np.save(output_subfolder / "geninue_std.npy", calculate_std_from_cor(geninue_data))
 
 
 def build_and_save_dataset(config: DatasetConfig) -> Path:
     observations = collect_pair_observations(config)
-    train_observations = [obs for obs in observations if obs[0] < config.event_date]
+    train_observations = select_adjacent_sequence_window(
+        observations,
+        reference_date=config.event_date,
+        sequence_length=config.sequence_length,
+    )
+
+    matrix_date_window, matrix_observations = select_matrix_pair_window(
+        observations,
+        reference_date=config.event_date,
+        matrix_size=config.matrix_size,
+    )
 
     timeseries, dates = build_insar_timeseries_from_observations(train_observations)
     geninue_data = observations[-1][2]
 
-    output_subfolder = config.output_dir / "dataset"
-    save_dataset(output_subfolder, timeseries, dates, geninue_data)
+    output_subfolder = config.output_dir / (config.dataset_name or _default_dataset_name(config.observation_file))
+    save_dataset(
+        output_subfolder,
+        timeseries,
+        dates,
+        geninue_data,
+        data_mode=_observation_metric(config.observation_file),
+        looks=config.looks or 3.0,
+        save_legacy_aliases=config.save_legacy_aliases,
+    )
+    if matrix_date_window:
+        with open(output_subfolder / "matrix_dates.pkl", "wb") as f:
+            pickle.dump(matrix_date_window, f)
+        with open(output_subfolder / "matrix_pairs.pkl", "wb") as f:
+            pickle.dump([obs[1] for obs in matrix_observations], f)
     return output_subfolder
