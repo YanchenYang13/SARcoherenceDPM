@@ -60,6 +60,7 @@ def _build_dataset_config(args: argparse.Namespace):
         matrix_size=args.matrix_size,
         observation_file=args.observation_file,
         dataset_name=args.dataset_name,
+        save_legacy_aliases=not args.no_legacy_aliases,
     )
 
 
@@ -555,16 +556,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input-source", choices=["cor", "stack_int"], default="cor")
     parser.add_argument(
         "--observation-file",
-        choices=[
-            "filt_fine.cor",
-            "fine.cor.full",
-            "unfilt_fine.cor",
-            "underamp_unfilt_fine.cor",
-            "underamp_unfilt_fine_circ.cor",
-            "filt_fine.std",
-        ],
         default="filt_fine.cor",
-        help="Cropped observation product used when input_source=cor.",
+        help=(
+            "Cropped observation product used when input_source=cor. "
+            "Supports any *.cor / *.std file (e.g. std_cor.cor) and fine.cor.full."
+        ),
     )
     parser.add_argument("--stack-root", type=Path, default=None)
     parser.add_argument(
@@ -580,6 +576,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sequence-length", type=int, default=None, help="Number of nearest pre-event adjacent pairs to keep for time series.")
     parser.add_argument("--matrix-size", type=int, default=None, help="Number of pre-event acquisition dates used for matrix-pair filtering.")
     parser.add_argument("--dataset-name", default=None, help="Optional dataset output folder name.")
+    parser.add_argument("--no-legacy-aliases", action="store_true", help="Do not save backward-compatible alias files (data*.npy/geninue*.npy).")
     parser.add_argument("--artifact-tag", default="", help="Optional suffix added to model/score artifact prefixes.")
 
     parser.add_argument("--aux-corr-win", type=int, default=5, help="ICU PHASESIGMA correlation window for prepare_int_aux.")

@@ -32,6 +32,7 @@ class DatasetConfig:
     matrix_size: int | None = None
     observation_file: str = "filt_fine.cor"
     dataset_name: str | None = None
+    save_legacy_aliases: bool = True
 
 
 def _observation_metric(observation_file: str) -> str:
@@ -271,6 +272,7 @@ def save_dataset(
     geninue_data: np.ndarray,
     data_mode: str = "coherence",
     looks: float = 3.0,
+    save_legacy_aliases: bool = True,
 ) -> None:
     output_subfolder.mkdir(parents=True, exist_ok=True)
 
@@ -279,32 +281,34 @@ def save_dataset(
         coherence_observation = _phase_std_to_coherence_from_looks(geninue_data, looks)
 
         np.save(output_subfolder / "rnn_data.npy", coherence_timeseries)
-        np.save(output_subfolder / "data.npy", coherence_timeseries)
         np.save(output_subfolder / "rnn_data_std.npy", timeseries)
-        np.save(output_subfolder / "data_std.npy", timeseries)
         np.save(output_subfolder / "score_observation.npy", coherence_observation)
-        np.save(output_subfolder / "geninue.npy", coherence_observation)
         np.save(output_subfolder / "score_observation_std.npy", np.expand_dims(geninue_data, axis=-1) if geninue_data.ndim == 2 else geninue_data)
-        np.save(output_subfolder / "geninue_std.npy", np.expand_dims(geninue_data, axis=-1) if geninue_data.ndim == 2 else geninue_data)
+        if save_legacy_aliases:
+            np.save(output_subfolder / "data.npy", coherence_timeseries)
+            np.save(output_subfolder / "data_std.npy", timeseries)
+            np.save(output_subfolder / "geninue.npy", coherence_observation)
+            np.save(output_subfolder / "geninue_std.npy", np.expand_dims(geninue_data, axis=-1) if geninue_data.ndim == 2 else geninue_data)
     else:
+        timeseries_std = calculate_std_from_cor(timeseries)
         # RNN canonical files
         np.save(output_subfolder / "rnn_data.npy", timeseries)
-        np.save(output_subfolder / "rnn_data_std.npy", calculate_std_from_cor(timeseries))
+        np.save(output_subfolder / "rnn_data_std.npy", timeseries_std)
 
-        # backward-compatible aliases
-        np.save(output_subfolder / "data.npy", timeseries)
-        np.save(output_subfolder / "data_std.npy", calculate_std_from_cor(timeseries))
-
-        # score-required observations (canonical + backward-compatible aliases)
+        # score-required observations
         np.save(output_subfolder / "score_observation.npy", geninue_data)
-        np.save(output_subfolder / "geninue.npy", geninue_data)
 
         if geninue_data.ndim == 2:
             geninue_data = np.expand_dims(geninue_data, axis=-1)
 
         gen_std = calculate_std_from_cor(geninue_data)
         np.save(output_subfolder / "score_observation_std.npy", gen_std)
-        np.save(output_subfolder / "geninue_std.npy", gen_std)
+        if save_legacy_aliases:
+            # backward-compatible aliases
+            np.save(output_subfolder / "data.npy", timeseries)
+            np.save(output_subfolder / "data_std.npy", timeseries_std)
+            np.save(output_subfolder / "geninue.npy", geninue_data)
+            np.save(output_subfolder / "geninue_std.npy", gen_std)
 
     with open(output_subfolder / "dates.pkl", "wb") as f:
         pickle.dump(dates, f)
@@ -335,6 +339,7 @@ def build_and_save_dataset(config: DatasetConfig) -> Path:
         geninue_data,
         data_mode=_observation_metric(config.observation_file),
         looks=config.looks or 3.0,
+        save_legacy_aliases=config.save_legacy_aliases,
     )
     if matrix_date_window:
         with open(output_subfolder / "matrix_dates.pkl", "wb") as f:
