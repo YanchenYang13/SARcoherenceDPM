@@ -11,7 +11,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from sklearn.preprocessing import MinMaxScaler, RobustScaler
 from torch.utils.data import DataLoader, Dataset
 
 
@@ -25,6 +24,8 @@ class InSARDataset(Dataset):
         use_zscore: bool = False,
         metric: Literal["phase_std", "coherence"] = "phase_std",
         scaler_type: str = "robust",
+        prefit_scaler_center: np.ndarray | None = None,
+        prefit_scaler_scale: np.ndarray | None = None,
     ):
         self.data = data
         self.height, self.width, self.time_steps = data.shape
@@ -83,20 +84,59 @@ class InSARDataset(Dataset):
         seq_pos = np.arange(n_dates, dtype=np.float32) / max(n_dates - 1, 1)
         self.time_features = np.column_stack([self.time_features, seq_pos])
 
-        # Per-pixel scaling
-        self.scalers = {}
-        self.scaled_data = np.zeros_like(self.data, dtype=np.float32)
-        for i in range(self.height):
-            for j in range(self.width):
-                if scaler_type == "robust":
-                    scaler = RobustScaler()
-                else:
-                    scaler = MinMaxScaler(feature_range=(-1, 1))
-                pixel_ts = self.data[i, j, :]
-                if self.use_zscore:
-                    pixel_ts = _to_zscore_training_space(pixel_ts, self.metric)
-                self.scaled_data[i, j, :] = scaler.fit_transform(pixel_ts.reshape(-1, 1)).flatten()
-                self.scalers[(i, j)] = scaler
+        # ------------------------------------------------------------------
+        # Vectorised per-pixel scaling (replaces the former per-pixel loop
+        # over sklearn scalers, which was the main performance bottleneck).
+        #
+        # Convention: forward  X_scaled = (X - center) / scale
+        #             inverse  X        = X_scaled * scale + center
+        #
+        # For RobustScaler : center = median, scale = IQR (Q75 − Q25)
+        # For MinMaxScaler(-1,1): center = (min+max)/2,  scale = (max−min)/2
+        #
+        # If pre-fitted arrays are supplied (prediction dataset reusing the
+        # training scaler), they are used directly and no fitting is done.
+        # ------------------------------------------------------------------
+        if prefit_scaler_center is not None and prefit_scaler_scale is not None:
+            self.scaler_center = prefit_scaler_center
+            self.scaler_scale = prefit_scaler_scale
+        else:
+            # Apply zscore transform before computing scaler statistics so
+            # that the scaler operates in logit-coherence space.
+            fit_data = (
+                _to_zscore_training_space(data[:, :, : self.time_steps], self.metric)
+                if use_zscore
+                else data[:, :, : self.time_steps].astype(np.float32)
+            )
+
+            if scaler_type == "robust":
+                self.scaler_center = np.median(fit_data, axis=2).astype(np.float32)
+                q25 = np.percentile(fit_data, 25, axis=2).astype(np.float32)
+                q75 = np.percentile(fit_data, 75, axis=2).astype(np.float32)
+                self.scaler_scale = (q75 - q25).astype(np.float32)
+            else:
+                # MinMaxScaler equivalent with feature_range=(-1, 1)
+                data_min = fit_data.min(axis=2).astype(np.float32)
+                data_max = fit_data.max(axis=2).astype(np.float32)
+                self.scaler_center = ((data_min + data_max) / 2.0).astype(np.float32)
+                self.scaler_scale = ((data_max - data_min) / 2.0).astype(np.float32)
+
+            # Constant pixels (zero IQR / zero range) get scale = 1 so that
+            # scaled output is 0 everywhere instead of NaN.
+            self.scaler_scale = np.where(
+                self.scaler_scale == 0, np.float32(1.0), self.scaler_scale
+            )
+
+        # Apply the scaling to the whole data cube in one vectorised pass.
+        transformed = (
+            _to_zscore_training_space(data, self.metric)
+            if use_zscore
+            else data.astype(np.float32)
+        )
+        self.scaled_data = (
+            (transformed - self.scaler_center[:, :, np.newaxis])
+            / self.scaler_scale[:, :, np.newaxis]
+        ).astype(np.float32)
 
         self.samples = [(i, j) for i in range(self.height) for j in range(self.width)]
 
@@ -335,8 +375,29 @@ def _zscore_space_to_metric_std(std_in_zspace: float, z_value: float, metric: st
 
 
 def _normal_nll(mu: torch.Tensor, logvar: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    # Gaussian negative log-likelihood (constant −0.5·log(2π) omitted).
+    # NLL = 0.5 * (logvar + (target − μ)² / σ²)
+    # This value can be negative when the model learns a tight predictive
+    # distribution (small logvar) and fits the data well — that is expected
+    # and correct behaviour, not a sign of numerical error.
     var = torch.exp(logvar).clamp(min=1e-6)
     return (0.5 * (logvar + ((target - mu) ** 2) / var)).mean()
+
+
+def _zscore_space_to_metric_std_vec(
+    std_in_zspace: np.ndarray, z_value: np.ndarray, metric: str
+) -> np.ndarray:
+    """Vectorised version of _zscore_space_to_metric_std for batch prediction."""
+    coh = _safe_sigmoid(z_value)  # shape matches input
+    dcoh_dz = coh * (1.0 - coh)
+    if metric == "coherence":
+        return np.abs(dcoh_dz) * std_in_zspace
+
+    c = np.maximum(coh, 1e-6)
+    one_minus_c2 = np.maximum(1.0 - c * c, 1e-8)
+    dstd_dc = -1.0 / (np.sqrt(2.0) * c * c * np.sqrt(one_minus_c2))
+    dstd_dz = dstd_dc * dcoh_dz
+    return np.abs(dstd_dz) * std_in_zspace
 
 
 def train_model(
@@ -354,6 +415,7 @@ def train_model(
         device = torch.device(device)
     model.to(device)
     best_val_loss = float("inf")
+    prev_val_loss = float("inf")
 
     # Cosine annealing LR scheduler
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -412,12 +474,21 @@ def train_model(
         val_loss /= len(val_loader.dataset)
 
         current_lr = scheduler.get_last_lr()[0]
+        val_loss_delta = prev_val_loss - val_loss
+        # Relative improvement < 0.01 % signals practical convergence.
+        converged = (
+            prev_val_loss != float("inf")
+            and abs(val_loss_delta / (abs(prev_val_loss) + 1e-12)) < 1e-4
+        )
         print(
             f"[RNN][epoch {epoch + 1}/{num_epochs}] "
             f"train_loss={epoch_loss / max(len(train_loader), 1):.6f} "
-            f"val_loss={val_loss:.6f} best={best_val_loss:.6f} lr={current_lr:.2e}",
+            f"val_loss={val_loss:.6f} best={best_val_loss:.6f} "
+            f"delta={val_loss_delta:+.6f} lr={current_lr:.2e}"
+            + (" [converged]" if converged else ""),
             flush=True,
         )
+        prev_val_loss = val_loss
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             epochs_no_improve = 0
@@ -450,29 +521,47 @@ def predict_future(
 
     with torch.no_grad():
         for batch in dataloader:
-            coords = batch["pixel_coords"].numpy()
+            coords = batch["pixel_coords"].numpy()  # (B, 2)
+            pixel_is = coords[:, 0]
+            pixel_js = coords[:, 1]
+
             x = batch["x"].to(device)
             time_features = batch["time_features"].to(device)
             target_time_features = batch["target_time_features"].to(device)
             outputs = model(x, time_features, target_time_features)
+
             if isinstance(outputs, tuple):
                 pred_mean, pred_logvar = outputs
-                model_output = pred_mean
-                model_std = torch.exp(0.5 * pred_logvar)
+                mean_np = pred_mean.cpu().numpy()  # (B,)
+                # model_std is std in *scaled* space
+                model_std_np = torch.exp(0.5 * pred_logvar).cpu().numpy()  # (B,)
             else:
-                model_output = outputs
-                model_std = None
-            for i in range(len(coords)):
-                pixel_i, pixel_j = coords[i]
-                scaler = dataset.scalers[(pixel_i, pixel_j)]
-                pred_value = scaler.inverse_transform(model_output[i].cpu().numpy().reshape(-1, 1))[0, 0]
-                if dataset.use_zscore:
-                    pred_value = _from_zscore_training_space(np.array([pred_value], dtype=np.float32), dataset.metric)[0]
-                predictions[pixel_i, pixel_j] = pred_value
-                if pred_std is not None and model_std is not None:
-                    latent_std = model_std[i].item() / (scaler.scale_[0] + 1e-12)
-                    latent_mean = scaler.inverse_transform(model_output[i].cpu().numpy().reshape(-1, 1))[0, 0]
-                    pred_std[pixel_i, pixel_j] = _zscore_space_to_metric_std(latent_std, latent_mean, dataset.metric)
+                mean_np = outputs.cpu().numpy()  # (B,)
+                model_std_np = None
+
+            # ----------------------------------------------------------
+            # Vectorised inverse scaling: X_latent = X_scaled * scale + center
+            # Convention matches InSARDataset: X_scaled = (X - center)/scale
+            # ----------------------------------------------------------
+            scale = dataset.scaler_scale[pixel_is, pixel_js]   # (B,)
+            center = dataset.scaler_center[pixel_is, pixel_js]  # (B,)
+            pred_latent = mean_np * scale + center  # (B,) — value in z-space
+
+            if dataset.use_zscore:
+                pred_values = _from_zscore_training_space(pred_latent, dataset.metric)
+            else:
+                pred_values = pred_latent
+
+            predictions[pixel_is, pixel_js] = pred_values
+
+            if pred_std is not None and model_std_np is not None:
+                # Propagate std from scaled space to z-space:
+                #   X_latent = X_scaled * scale  →  σ_latent = σ_scaled * scale
+                # (previously this mistakenly divided by scale)
+                latent_std = model_std_np * scale  # (B,)
+                pred_std[pixel_is, pixel_js] = _zscore_space_to_metric_std_vec(
+                    latent_std, pred_latent, dataset.metric
+                )
 
     return predictions, pred_std
 
@@ -537,6 +626,12 @@ def run_training_and_prediction(config: TrainingConfig) -> Path:
     )
     print(f"[RNN] scaler_type={scaler_type}", flush=True)
     print(f"[RNN] train_samples={len(train_dataset)} val_samples={len(val_dataset)}", flush=True)
+    if config.use_zscore:
+        print(
+            "[RNN] loss=NLL (Gaussian negative log-likelihood in logit-coherence space); "
+            "negative values are expected once the model learns a tight predictive distribution",
+            flush=True,
+        )
 
     base_model = _build_model(config)
     model = InSARDistributionHead(base_model) if config.use_zscore else base_model
@@ -569,6 +664,9 @@ def run_training_and_prediction(config: TrainingConfig) -> Path:
     )
     model.load_state_dict(torch.load(checkpoint_path, map_location=device))
 
+    # Reuse the scaler statistics fitted on training data — the prediction
+    # dataset covers the same spatial pixels so refitting is redundant and
+    # would be as slow as the initial fit.
     all_dates = dates + [config.next_date]
     predict_dataset = InSARDataset(
         data,
@@ -578,6 +676,8 @@ def run_training_and_prediction(config: TrainingConfig) -> Path:
         use_zscore=config.use_zscore,
         metric=config.metric,
         scaler_type=scaler_type,
+        prefit_scaler_center=full_dataset.scaler_center,
+        prefit_scaler_scale=full_dataset.scaler_scale,
     )
     future_predictions, future_pred_std = predict_future(
         model,
