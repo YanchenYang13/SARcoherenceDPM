@@ -130,16 +130,22 @@ def _default_score_filename(args: argparse.Namespace, dataset_dir: Path) -> str:
 
 
 def _show_predict_artifacts(predict_dir: Path, prefix: str, use_zscore: bool) -> None:
-    names = [
-        "future_predictions.npy",
-        f"{prefix}_future_predictions.npy",
-        "best_model.pth",
-        "best_vit_model.pth",
-        f"{prefix}_best_model.pth",
-        f"{prefix}_best_vit_model.pth",
-    ]
-    if use_zscore:
-        names += ["future_prediction_std.npy", f"{prefix}_future_prediction_std.npy"]
+    if prefix:
+        names = [
+            f"{prefix}_future_predictions.npy",
+            f"{prefix}_best_model.pth",
+            f"{prefix}_best_vit_model.pth",
+        ]
+        if use_zscore:
+            names.append(f"{prefix}_future_prediction_std.npy")
+    else:
+        names = [
+            "future_predictions.npy",
+            "best_model.pth",
+            "best_vit_model.pth",
+        ]
+        if use_zscore:
+            names.append("future_prediction_std.npy")
     print("  - artifacts:")
     for n in names:
         p = predict_dir / n

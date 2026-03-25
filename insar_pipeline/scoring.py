@@ -67,9 +67,6 @@ def compute_and_save_score(config: ScoreConfig) -> Path:
             score = np.load(ccd_prob).astype(np.float32)
             output_path = config.predict_dir / config.score_filename
             np.save(output_path, score)
-            if config.artifact_prefix:
-                prefixed_path = config.predict_dir / f"{config.artifact_prefix}_{config.score_filename}"
-                np.save(prefixed_path, score)
             return output_path
 
     genuine_filename = _resolve_observation_filename(config.dataset_dir, config.metric)
@@ -133,8 +130,5 @@ def compute_and_save_score(config: ScoreConfig) -> Path:
 
     output_path = config.predict_dir / config.score_filename
     np.save(output_path, score)
-    if config.artifact_prefix:
-        prefixed_path = config.predict_dir / f"{config.artifact_prefix}_{config.score_filename}"
-        np.save(prefixed_path, score)
     return output_path
 

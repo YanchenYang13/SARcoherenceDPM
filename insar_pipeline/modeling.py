@@ -323,6 +323,11 @@ class TrainingConfig:
     artifact_prefix: str = ""
 
 
+def _artifact_name(prefix: str, base_name: str) -> str:
+    """Return ``{prefix}_{base_name}`` when a prefix is set, else ``base_name``."""
+    return f"{prefix}_{base_name}" if prefix else base_name
+
+
 def _safe_logit(values: np.ndarray, eps: float = 1e-6) -> np.ndarray:
     clipped = np.clip(values, eps, 1 - eps)
     return np.log(clipped / (1 - clipped)).astype(np.float32)
@@ -687,14 +692,8 @@ def run_training_and_prediction(config: TrainingConfig) -> Path:
         use_zscore=config.use_zscore,
     )
 
-    np.save(predict_dir / "future_predictions.npy", future_predictions)
-    if config.artifact_prefix:
-        np.save(predict_dir / f"{config.artifact_prefix}_future_predictions.npy", future_predictions)
+    np.save(predict_dir / _artifact_name(config.artifact_prefix, "future_predictions.npy"), future_predictions)
     if future_pred_std is not None:
-        np.save(predict_dir / "future_prediction_std.npy", future_pred_std)
-        if config.artifact_prefix:
-            np.save(predict_dir / f"{config.artifact_prefix}_future_prediction_std.npy", future_pred_std)
-    torch.save(model.state_dict(), predict_dir / "best_model.pth")
-    if config.artifact_prefix:
-        torch.save(model.state_dict(), predict_dir / f"{config.artifact_prefix}_best_model.pth")
+        np.save(predict_dir / _artifact_name(config.artifact_prefix, "future_prediction_std.npy"), future_pred_std)
+    torch.save(model.state_dict(), predict_dir / _artifact_name(config.artifact_prefix, "best_model.pth"))
     return predict_dir
