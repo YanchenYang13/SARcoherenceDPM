@@ -34,16 +34,20 @@ class InSARDataset(Dataset):
         self.metric = metric
 
         # -----------------------------------------------------------------
-        # IMPROVED time-feature encoding (dim=7, same as before)
-        #   OLD: [year_sin, year_cos, month_sin, month_cos, day_sin, day_cos, raw_interval]
-        #   NEW: [doy_sin,  doy_cos,  month_sin, month_cos, day_sin, day_cos, norm_interval]
+        # IMPROVED time-feature encoding (dim=8)
+        #   [doy_sin, doy_cos, month_sin, month_cos, day_sin, day_cos,
+        #    norm_interval, seq_pos]
         #
-        # Key changes:
-        # 1) year_sin/cos (period=2100) was essentially constant → replaced
-        #    with day-of-year sin/cos (period=365.25) that captures seasonal
-        #    decorrelation (vegetation, snow cover).
-        # 2) interval (temporal baseline in days) is now normalized to [0,1]
-        #    so it has the same scale as sin/cos features.
+        # Features:
+        # 1) doy_sin/cos (period=365.25): captures seasonal decorrelation
+        #    (vegetation, snow cover, soil moisture).
+        # 2) month_sin/cos, day_sin/cos: fine-grained calendar position.
+        # 3) norm_interval: temporal baseline normalised to [0,1]; distinguishes
+        #    6-day from 12-day acquisitions.
+        # 4) seq_pos: normalised sequence position in [0,1] (0=oldest pair in
+        #    the dataset, 1=most recent / prediction target).  This gives the
+        #    LSTM an explicit recency cue so it can weight recent pre-event
+        #    coherence more heavily when anticipating the post-event scene.
         # -----------------------------------------------------------------
         intervals = []
         self.time_features = []
@@ -70,6 +74,14 @@ class InSARDataset(Dataset):
         if max_interval == 0:
             max_interval = 1.0
         self.time_features[:, 6] /= max_interval
+
+        # Append normalised sequence position [0, 1] as 8th feature.
+        # The position reflects temporal order: 0 = oldest pair in the
+        # current dataset window, 1 = most recent entry (or the prediction
+        # target date when is_prediction=True).
+        n_dates = len(self.time_features)
+        seq_pos = np.arange(n_dates, dtype=np.float32) / max(n_dates - 1, 1)
+        self.time_features = np.column_stack([self.time_features, seq_pos])
 
         # Per-pixel scaling
         self.scalers = {}
@@ -122,7 +134,7 @@ class InSARDataset(Dataset):
 class InSARLSTM(nn.Module):
     """LSTM with gated time-feature fusion and true notime bypass."""
 
-    def __init__(self, input_dim=1, hidden_dim=64, num_layers=2, dropout=0.1, time_feat_dim=7):
+    def __init__(self, input_dim=1, hidden_dim=64, num_layers=2, dropout=0.1, time_feat_dim=8):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.input_embedding = nn.Linear(input_dim, hidden_dim)
@@ -181,7 +193,7 @@ class InSARLSTM(nn.Module):
 class InSARGRU(nn.Module):
     """GRU variant with the same gated-fusion improvements."""
 
-    def __init__(self, input_dim=1, hidden_dim=64, num_layers=2, dropout=0.1, time_feat_dim=7):
+    def __init__(self, input_dim=1, hidden_dim=64, num_layers=2, dropout=0.1, time_feat_dim=8):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.input_embedding = nn.Linear(input_dim, hidden_dim)
