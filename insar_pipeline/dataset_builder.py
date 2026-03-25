@@ -219,17 +219,17 @@ def collect_pair_observations(config: DatasetConfig) -> list[tuple[dt.datetime, 
 def build_insar_timeseries_from_observations(
     observations: list[tuple[dt.datetime, str, np.ndarray]],
 ) -> tuple[np.ndarray, list[str]]:
-    if len(observations) < 2:
-        raise RuntimeError("Need at least 2 observations to build timeseries and target")
+    if len(observations) < 1:
+        raise RuntimeError("Need at least 1 observation to build timeseries")
 
     first = observations[0][2]
     h, w = first.shape
     t = len(observations)
 
-    timeseries = np.zeros((h, w, t - 1), dtype=np.float32)
+    timeseries = np.zeros((h, w, t), dtype=np.float32)
     dates: list[str] = []
 
-    for i, (_, date_str, coh) in enumerate(observations[:-1]):
+    for i, (_, date_str, coh) in enumerate(observations):
         if coh.shape != (h, w):
             raise ValueError(f"Shape mismatch for {date_str}: {coh.shape} vs {(h, w)}")
         timeseries[:, :, i] = coh
