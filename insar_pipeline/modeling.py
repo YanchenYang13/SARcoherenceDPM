@@ -11,7 +11,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import MinMaxScaler, RobustScaler
 from torch.utils.data import DataLoader, Dataset
 
 
@@ -24,6 +24,7 @@ class InSARDataset(Dataset):
         use_timestamp: bool = True,
         use_zscore: bool = False,
         metric: Literal["phase_std", "coherence"] = "phase_std",
+        scaler_type: str = "robust",
     ):
         self.data = data
         self.height, self.width, self.time_steps = data.shape
@@ -32,27 +33,53 @@ class InSARDataset(Dataset):
         self.use_zscore = use_zscore
         self.metric = metric
 
+        # -----------------------------------------------------------------
+        # IMPROVED time-feature encoding (dim=7, same as before)
+        #   OLD: [year_sin, year_cos, month_sin, month_cos, day_sin, day_cos, raw_interval]
+        #   NEW: [doy_sin,  doy_cos,  month_sin, month_cos, day_sin, day_cos, norm_interval]
+        #
+        # Key changes:
+        # 1) year_sin/cos (period=2100) was essentially constant → replaced
+        #    with day-of-year sin/cos (period=365.25) that captures seasonal
+        #    decorrelation (vegetation, snow cover).
+        # 2) interval (temporal baseline in days) is now normalized to [0,1]
+        #    so it has the same scale as sin/cos features.
+        # -----------------------------------------------------------------
+        intervals = []
         self.time_features = []
         for date_str in dates:
             start_date, end_date = date_str.split("_")
             start = datetime.datetime.strptime(start_date, "%Y%m%d")
             end = datetime.datetime.strptime(end_date, "%Y%m%d")
 
-            year_sin = np.sin(2 * np.pi * start.year / 2100)
-            year_cos = np.cos(2 * np.pi * start.year / 2100)
+            doy = start.timetuple().tm_yday
+            doy_sin = np.sin(2 * np.pi * doy / 365.25)
+            doy_cos = np.cos(2 * np.pi * doy / 365.25)
             month_sin = np.sin(2 * np.pi * start.month / 12)
             month_cos = np.cos(2 * np.pi * start.month / 12)
             day_sin = np.sin(2 * np.pi * start.day / 31)
             day_cos = np.cos(2 * np.pi * start.day / 31)
             interval = (end - start).days
-            self.time_features.append([year_sin, year_cos, month_sin, month_cos, day_sin, day_cos, interval])
-        self.time_features = np.array(self.time_features)
+            intervals.append(interval)
+            self.time_features.append([doy_sin, doy_cos, month_sin, month_cos, day_sin, day_cos, interval])
 
+        self.time_features = np.array(self.time_features, dtype=np.float32)
+
+        # Normalize interval to [0, 1]
+        max_interval = max(intervals) if intervals else 1.0
+        if max_interval == 0:
+            max_interval = 1.0
+        self.time_features[:, 6] /= max_interval
+
+        # Per-pixel scaling
         self.scalers = {}
         self.scaled_data = np.zeros_like(self.data, dtype=np.float32)
         for i in range(self.height):
             for j in range(self.width):
-                scaler = MinMaxScaler(feature_range=(-1, 1))
+                if scaler_type == "robust":
+                    scaler = RobustScaler()
+                else:
+                    scaler = MinMaxScaler(feature_range=(-1, 1))
                 pixel_ts = self.data[i, j, :]
                 if self.use_zscore:
                     pixel_ts = _to_zscore_training_space(pixel_ts, self.metric)
@@ -93,10 +120,21 @@ class InSARDataset(Dataset):
 
 
 class InSARLSTM(nn.Module):
+    """LSTM with gated time-feature fusion and true notime bypass."""
+
     def __init__(self, input_dim=1, hidden_dim=64, num_layers=2, dropout=0.1, time_feat_dim=7):
         super().__init__()
+        self.hidden_dim = hidden_dim
         self.input_embedding = nn.Linear(input_dim, hidden_dim)
         self.time_embedding = nn.Linear(time_feat_dim, hidden_dim)
+
+        # Gated fusion learns HOW MUCH time info to inject
+        self.fusion_gate = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.Sigmoid(),
+        )
+        self.layer_norm = nn.LayerNorm(hidden_dim)
+
         self.lstm = nn.LSTM(
             input_size=hidden_dim,
             hidden_size=hidden_dim,
@@ -105,25 +143,56 @@ class InSARLSTM(nn.Module):
             dropout=dropout if num_layers > 1 else 0,
         )
         self.target_time_proj = nn.Linear(time_feat_dim, hidden_dim)
-        self.output_layer = nn.Sequential(nn.Linear(hidden_dim * 2, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, 1))
+        self.output_layer = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, 1),
+        )
 
     def forward(self, src, time_features, target_time_features):
         src = src.unsqueeze(-1)
-        src = self.input_embedding(src)
-        time_embed = self.time_embedding(time_features)
-        combined_input = src + time_embed
+        src_embed = self.input_embedding(src)
+
+        # True bypass: when time features are all zero, skip fusion entirely
+        time_active = time_features.abs().sum() > 0
+
+        if time_active:
+            time_embed = self.time_embedding(time_features)
+            gate_input = torch.cat([src_embed, time_embed], dim=-1)
+            gate = self.fusion_gate(gate_input)
+            combined_input = gate * src_embed + (1 - gate) * time_embed
+            combined_input = self.layer_norm(combined_input)
+        else:
+            combined_input = self.layer_norm(src_embed)
+
         _, (h_n, _) = self.lstm(combined_input)
         seq_repr = h_n[-1]
-        target_time_embed = self.target_time_proj(target_time_features)
-        combined = torch.cat([seq_repr, target_time_embed], dim=-1)
+
+        if time_active:
+            target_time_embed = self.target_time_proj(target_time_features)
+            combined = torch.cat([seq_repr, target_time_embed], dim=-1)
+        else:
+            combined = torch.cat([seq_repr, torch.zeros_like(seq_repr)], dim=-1)
+
         return self.output_layer(combined).squeeze(-1)
 
 
 class InSARGRU(nn.Module):
+    """GRU variant with the same gated-fusion improvements."""
+
     def __init__(self, input_dim=1, hidden_dim=64, num_layers=2, dropout=0.1, time_feat_dim=7):
         super().__init__()
+        self.hidden_dim = hidden_dim
         self.input_embedding = nn.Linear(input_dim, hidden_dim)
         self.time_embedding = nn.Linear(time_feat_dim, hidden_dim)
+
+        self.fusion_gate = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.Sigmoid(),
+        )
+        self.layer_norm = nn.LayerNorm(hidden_dim)
+
         self.gru = nn.GRU(
             input_size=hidden_dim,
             hidden_size=hidden_dim,
@@ -132,17 +201,37 @@ class InSARGRU(nn.Module):
             dropout=dropout if num_layers > 1 else 0,
         )
         self.target_time_proj = nn.Linear(time_feat_dim, hidden_dim)
-        self.output_layer = nn.Sequential(nn.Linear(hidden_dim * 2, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, 1))
+        self.output_layer = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, 1),
+        )
 
     def forward(self, src, time_features, target_time_features):
         src = src.unsqueeze(-1)
-        src = self.input_embedding(src)
-        time_embed = self.time_embedding(time_features)
-        combined_input = src + time_embed
+        src_embed = self.input_embedding(src)
+
+        time_active = time_features.abs().sum() > 0
+
+        if time_active:
+            time_embed = self.time_embedding(time_features)
+            gate_input = torch.cat([src_embed, time_embed], dim=-1)
+            gate = self.fusion_gate(gate_input)
+            combined_input = gate * src_embed + (1 - gate) * time_embed
+            combined_input = self.layer_norm(combined_input)
+        else:
+            combined_input = self.layer_norm(src_embed)
+
         _, h_n = self.gru(combined_input)
         seq_repr = h_n[-1]
-        target_time_embed = self.target_time_proj(target_time_features)
-        combined = torch.cat([seq_repr, target_time_embed], dim=-1)
+
+        if time_active:
+            target_time_embed = self.target_time_proj(target_time_features)
+            combined = torch.cat([seq_repr, target_time_embed], dim=-1)
+        else:
+            combined = torch.cat([seq_repr, torch.zeros_like(seq_repr)], dim=-1)
+
         return self.output_layer(combined).squeeze(-1)
 
 
@@ -226,7 +315,6 @@ def _zscore_space_to_metric_std(std_in_zspace: float, z_value: float, metric: st
     if metric == "coherence":
         return float(abs(dcoh_dz) * std_in_zspace)
 
-    # metric == "phase_std", where phase_std = sqrt((1-c^2)/(2*c^2))
     c = max(coh, 1e-6)
     one_minus_c2 = max(1.0 - c * c, 1e-8)
     dstd_dc = -1.0 / (np.sqrt(2.0) * c * c * np.sqrt(one_minus_c2))
@@ -254,6 +342,15 @@ def train_model(
         device = torch.device(device)
     model.to(device)
     best_val_loss = float("inf")
+
+    # Cosine annealing LR scheduler
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=num_epochs, eta_min=1e-6
+    )
+
+    # Early stopping
+    patience = max(num_epochs // 3, 5)
+    epochs_no_improve = 0
 
     for epoch in range(num_epochs):
         model.train()
@@ -284,6 +381,8 @@ def train_model(
                     flush=True,
                 )
 
+        scheduler.step()
+
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
@@ -300,16 +399,27 @@ def train_model(
                 val_loss += loss.item() * x.size(0)
         val_loss /= len(val_loader.dataset)
 
+        current_lr = scheduler.get_last_lr()[0]
         print(
             f"[RNN][epoch {epoch + 1}/{num_epochs}] "
             f"train_loss={epoch_loss / max(len(train_loader), 1):.6f} "
-            f"val_loss={val_loss:.6f} best={best_val_loss:.6f}",
+            f"val_loss={val_loss:.6f} best={best_val_loss:.6f} lr={current_lr:.2e}",
             flush=True,
         )
         if val_loss < best_val_loss:
             best_val_loss = val_loss
+            epochs_no_improve = 0
             torch.save(model.state_dict(), checkpoint_path)
             print(f"[RNN] saved_best_model={checkpoint_path}", flush=True)
+        else:
+            epochs_no_improve += 1
+            if epochs_no_improve >= patience:
+                print(
+                    f"[RNN] early_stopping epoch={epoch + 1} patience={patience} "
+                    f"best_val_loss={best_val_loss:.6f}",
+                    flush=True,
+                )
+                break
 
     return model
 
@@ -369,19 +479,6 @@ def _resolve_timeseries_filename(dataset_dir: Path, metric: str) -> str:
             return name
     raise FileNotFoundError(f"No timeseries dataset file found in {dataset_dir}. Tried: {candidates}")
 
-def _resolve_timeseries_filename(dataset_dir: Path, metric: str) -> str:
-    candidates = ["rnn_data_std.npy", "data_std.npy"] if metric == "phase_std" else ["rnn_data.npy", "data.npy"]
-    for name in candidates:
-        if (dataset_dir / name).exists():
-            return name
-    raise FileNotFoundError(f"No timeseries dataset file found in {dataset_dir}. Tried: {candidates}")
-
-def _resolve_timeseries_filename(dataset_dir: Path, metric: str) -> str:
-    candidates = ["rnn_data_std.npy", "data_std.npy"] if metric == "phase_std" else ["rnn_data.npy", "data.npy"]
-    for name in candidates:
-        if (dataset_dir / name).exists():
-            return name
-    raise FileNotFoundError(f"No timeseries dataset file found in {dataset_dir}. Tried: {candidates}")
 
 def run_training_and_prediction(config: TrainingConfig) -> Path:
     data_filename = _resolve_timeseries_filename(config.dataset_dir, config.metric)
@@ -389,6 +486,8 @@ def run_training_and_prediction(config: TrainingConfig) -> Path:
     data = np.load(config.dataset_dir / data_filename)
     with open(config.dataset_dir / "dates.pkl", "rb") as f:
         dates = pickle.load(f)
+
+    scaler_type = "robust"
 
     prep_start = time.perf_counter()
     print("[RNN] preparing_dataset_scalers=start", flush=True)
@@ -398,6 +497,7 @@ def run_training_and_prediction(config: TrainingConfig) -> Path:
         use_timestamp=config.use_timestamp,
         use_zscore=config.use_zscore,
         metric=config.metric,
+        scaler_type=scaler_type,
     )
     print(f"[RNN] preparing_dataset_scalers=done elapsed_sec={time.perf_counter() - prep_start:.2f}", flush=True)
     train_size = int(0.8 * len(full_dataset))
@@ -423,6 +523,7 @@ def run_training_and_prediction(config: TrainingConfig) -> Path:
         f"weight_decay={config.weight_decay} max_grad_norm={config.max_grad_norm}",
         flush=True,
     )
+    print(f"[RNN] scaler_type={scaler_type}", flush=True)
     print(f"[RNN] train_samples={len(train_dataset)} val_samples={len(val_dataset)}", flush=True)
 
     base_model = _build_model(config)
@@ -464,6 +565,7 @@ def run_training_and_prediction(config: TrainingConfig) -> Path:
         use_timestamp=config.use_timestamp,
         use_zscore=config.use_zscore,
         metric=config.metric,
+        scaler_type=scaler_type,
     )
     future_predictions, future_pred_std = predict_future(
         model,
