@@ -144,6 +144,11 @@ class ViTDatasetBuildConfig:
     matrix_mode: Literal["similarity", "outer", "difference"] = "similarity"
 
 
+def _artifact_name(prefix: str, base_name: str) -> str:
+    """Return ``{prefix}_{base_name}`` when a prefix is set, else ``base_name``."""
+    return f"{prefix}_{base_name}" if prefix else base_name
+
+
 def _load_sequence_data(dataset_dir: Path, metric: str) -> np.ndarray:
     candidates = ["rnn_data_std.npy", "data_std.npy"] if metric == "phase_std" else ["rnn_data.npy", "data.npy"]
     for name in candidates:
@@ -307,14 +312,8 @@ def run_vit_training_and_prediction(config: ViTConfig) -> Path:
 
     predict_dir = config.output_dir / "predict"
     predict_dir.mkdir(parents=True, exist_ok=True)
-    np.save(predict_dir / "future_predictions.npy", predictions)
-    if config.artifact_prefix:
-        np.save(predict_dir / f"{config.artifact_prefix}_future_predictions.npy", predictions)
+    np.save(predict_dir / _artifact_name(config.artifact_prefix, "future_predictions.npy"), predictions)
     if pred_std is not None:
-        np.save(predict_dir / "future_prediction_std.npy", pred_std)
-        if config.artifact_prefix:
-            np.save(predict_dir / f"{config.artifact_prefix}_future_prediction_std.npy", pred_std)
-    torch.save(model.state_dict(), predict_dir / "best_vit_model.pth")
-    if config.artifact_prefix:
-        torch.save(model.state_dict(), predict_dir / f"{config.artifact_prefix}_best_vit_model.pth")
+        np.save(predict_dir / _artifact_name(config.artifact_prefix, "future_prediction_std.npy"), pred_std)
+    torch.save(model.state_dict(), predict_dir / _artifact_name(config.artifact_prefix, "best_vit_model.pth"))
     return predict_dir
