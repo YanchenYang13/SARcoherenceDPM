@@ -104,7 +104,7 @@ class InSARDataset(Dataset):
             # Apply zscore transform before computing scaler statistics so
             # that the scaler operates in logit-coherence space.
             fit_data = (
-                _to_zscore_training_space(data[:, :, : self.time_steps], self.metric)
+                to_zscore_training_space(data[:, :, : self.time_steps], self.metric)
                 if use_zscore
                 else data[:, :, : self.time_steps].astype(np.float32)
             )
@@ -129,7 +129,7 @@ class InSARDataset(Dataset):
 
         # Apply the scaling to the whole data cube in one vectorised pass.
         transformed = (
-            _to_zscore_training_space(data, self.metric)
+            to_zscore_training_space(data, self.metric)
             if use_zscore
             else data.astype(np.float32)
         )
@@ -349,7 +349,7 @@ def _coherence_to_phase_std(coh: np.ndarray, eps: float = 1e-6) -> np.ndarray:
     return np.sqrt((1.0 - c**2) / (2.0 * c**2 + eps)).astype(np.float32)
 
 
-def _to_zscore_training_space(values: np.ndarray, metric: str) -> np.ndarray:
+def to_zscore_training_space(values: np.ndarray, metric: str) -> np.ndarray:
     if metric == "coherence":
         return _safe_logit(values)
     if metric == "phase_std":
@@ -518,10 +518,40 @@ def predict_future(
     batch_size: int = 256,
     device="cpu",
     use_zscore: bool = False,
-) -> tuple[np.ndarray, np.ndarray | None]:
+) -> tuple[np.ndarray, np.ndarray | None, np.ndarray | None, np.ndarray | None]:
+    """Run inference and return predictions.
+
+    Returns
+    -------
+    predictions : ndarray (H, W)
+        Predicted values in the original metric space (phase_std or coherence).
+    pred_metric_unc : ndarray (H, W) or None
+        Predictive uncertainty propagated to metric space via the delta method.
+        Available only when ``use_zscore=True`` and the model outputs a
+        distribution (mean + logvar).  NOTE: this approximation degrades near
+        extreme coherence values; prefer ``pred_latent_std`` for z-score
+        computation.
+    pred_latent : ndarray (H, W) or None
+        Model mean prediction in logit-coherence (latent / z) space.
+        The Gaussian NLL training loss is defined in this space, so z-scores
+        computed here are statistically well-defined.
+    pred_latent_std : ndarray (H, W) or None
+        Model distribution std in logit-coherence (latent / z) space.
+        This is the ``σ`` of the predicted Gaussian, NOT a phase_std value.
+    """
     model.eval()
     predictions = np.zeros((dataset.height, dataset.width), dtype=np.float32)
-    pred_std = np.zeros((dataset.height, dataset.width), dtype=np.float32) if use_zscore else None
+    # pred_metric_unc: delta-method uncertainty in metric space (kept for compat)
+    pred_metric_unc: np.ndarray | None = (
+        np.zeros((dataset.height, dataset.width), dtype=np.float32) if use_zscore else None
+    )
+    # pred_latent / pred_latent_std: prediction mean and std in logit-coherence space
+    pred_latent_arr: np.ndarray | None = (
+        np.zeros((dataset.height, dataset.width), dtype=np.float32) if use_zscore else None
+    )
+    pred_latent_std_arr: np.ndarray | None = (
+        np.zeros((dataset.height, dataset.width), dtype=np.float32) if use_zscore else None
+    )
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
 
     with torch.no_grad():
@@ -537,12 +567,12 @@ def predict_future(
 
             if isinstance(outputs, tuple):
                 pred_mean, pred_logvar = outputs
-                mean_np = pred_mean.cpu().numpy()  # (B,)
-                # model_std is std in *scaled* space
-                model_std_np = torch.exp(0.5 * pred_logvar).cpu().numpy()  # (B,)
+                mean_np = pred_mean.cpu().numpy()  # (B,) — scaled-space mean
+                # pred_dist_std: distribution std in *scaled* space (not phase_std!)
+                pred_dist_std_np = torch.exp(0.5 * pred_logvar).cpu().numpy()  # (B,)
             else:
                 mean_np = outputs.cpu().numpy()  # (B,)
-                model_std_np = None
+                pred_dist_std_np = None
 
             # ----------------------------------------------------------
             # Vectorised inverse scaling: X_latent = X_scaled * scale + center
@@ -550,7 +580,7 @@ def predict_future(
             # ----------------------------------------------------------
             scale = dataset.scaler_scale[pixel_is, pixel_js]   # (B,)
             center = dataset.scaler_center[pixel_is, pixel_js]  # (B,)
-            pred_latent = mean_np * scale + center  # (B,) — value in z-space
+            pred_latent = mean_np * scale + center  # (B,) — value in logit-coherence space
 
             if dataset.use_zscore:
                 pred_values = _from_zscore_training_space(pred_latent, dataset.metric)
@@ -559,16 +589,29 @@ def predict_future(
 
             predictions[pixel_is, pixel_js] = pred_values
 
-            if pred_std is not None and model_std_np is not None:
-                # Propagate std from scaled space to z-space:
+            if pred_dist_std_np is not None:
+                # Propagate distribution std from scaled space to logit-coherence space:
                 #   X_latent = X_scaled * scale  →  σ_latent = σ_scaled * scale
-                # (previously this mistakenly divided by scale)
-                latent_std = model_std_np * scale  # (B,)
-                pred_std[pixel_is, pixel_js] = _zscore_space_to_metric_std_vec(
-                    latent_std, pred_latent, dataset.metric
-                )
+                # σ_latent is the Gaussian std in logit-coherence space.
+                # This is conceptually separate from phase_std data values.
+                latent_std = pred_dist_std_np * scale  # (B,) — std in logit-coh space
 
-    return predictions, pred_std
+                if pred_latent_arr is not None:
+                    pred_latent_arr[pixel_is, pixel_js] = pred_latent
+                if pred_latent_std_arr is not None:
+                    pred_latent_std_arr[pixel_is, pixel_js] = latent_std
+
+                # Also propagate to metric space via delta method (kept for compat).
+                # NOTE: this approximation breaks down near extreme coherence values
+                # (coh ≈ 0 or coh ≈ 1) where the Jacobian vanishes, causing
+                # metric-space std ≈ 0 and hence exploding z-scores.
+                # Use latent-space z-scores instead for robust anomaly detection.
+                if pred_metric_unc is not None:
+                    pred_metric_unc[pixel_is, pixel_js] = _zscore_space_to_metric_std_vec(
+                        latent_std, pred_latent, dataset.metric
+                    )
+
+    return predictions, pred_metric_unc, pred_latent_arr, pred_latent_std_arr
 
 
 def _build_model(config: TrainingConfig) -> nn.Module:
@@ -684,7 +727,7 @@ def run_training_and_prediction(config: TrainingConfig) -> Path:
         prefit_scaler_center=full_dataset.scaler_center,
         prefit_scaler_scale=full_dataset.scaler_scale,
     )
-    future_predictions, future_pred_std = predict_future(
+    future_predictions, future_pred_metric_unc, future_pred_latent, future_pred_latent_std = predict_future(
         model,
         predict_dataset,
         batch_size=config.pred_batch_size,
@@ -693,7 +736,19 @@ def run_training_and_prediction(config: TrainingConfig) -> Path:
     )
 
     np.save(predict_dir / _artifact_name(config.artifact_prefix, "future_predictions.npy"), future_predictions)
-    if future_pred_std is not None:
-        np.save(predict_dir / _artifact_name(config.artifact_prefix, "future_prediction_std.npy"), future_pred_std)
+    if future_pred_metric_unc is not None:
+        # Metric-space uncertainty via delta method (kept for backward compat).
+        # For z-score computation use the latent-space files below instead.
+        np.save(predict_dir / _artifact_name(config.artifact_prefix, "future_prediction_std.npy"), future_pred_metric_unc)
+    if future_pred_latent is not None:
+        # Mean prediction in logit-coherence (latent / z) space.  The model's
+        # Gaussian NLL loss is defined here, making latent-space z-scores
+        # statistically well-defined and numerically stable.
+        np.save(predict_dir / _artifact_name(config.artifact_prefix, "future_predictions_latent.npy"), future_pred_latent)
+    if future_pred_latent_std is not None:
+        # Distribution std in logit-coherence space (σ of the predicted
+        # Gaussian).  Distinct from phase_std data values — this quantifies
+        # model uncertainty, not InSAR phase noise.
+        np.save(predict_dir / _artifact_name(config.artifact_prefix, "future_prediction_latent_std.npy"), future_pred_latent_std)
     torch.save(model.state_dict(), predict_dir / _artifact_name(config.artifact_prefix, "best_model.pth"))
     return predict_dir

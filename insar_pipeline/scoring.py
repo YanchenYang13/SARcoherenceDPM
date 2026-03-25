@@ -6,6 +6,11 @@ from typing import Literal
 
 import numpy as np
 
+from .modeling import to_zscore_training_space
+
+# Small constant used to avoid division by zero in score normalisation.
+_SCORE_EPS = 1e-8
+
 
 @dataclass
 class ScoreConfig:
@@ -94,24 +99,76 @@ def compute_and_save_score(config: ScoreConfig) -> Path:
         resolved_mode = "zscore" if config.use_zscore else "ndi"
 
     if resolved_mode == "zscore":
-        std_candidates = []
+        # ------------------------------------------------------------------
+        # Preferred: compute z-score in logit-coherence (latent) space.
+        #
+        # The RNN/GRU model is trained with Gaussian NLL in logit-coherence
+        # space, so the statistically correct z-score is:
+        #
+        #   z = (genuine_latent - pred_latent) / pred_latent_std
+        #
+        # where pred_latent_std is the model's distribution std (σ) in that
+        # space.  This is distinct from phase_std data values.
+        #
+        # Using metric-space z-scores (dividing by delta-method-propagated
+        # uncertainty) is problematic because the Jacobian d(metric)/d(z)
+        # approaches zero near extreme coherence values, making the
+        # propagated std ≈ 0 and the z-score blow up to ±hundreds or ±thousands.
+        # ------------------------------------------------------------------
+        latent_candidates = []
+        latent_std_candidates = []
         if config.artifact_prefix:
-            std_candidates.append(f"{config.artifact_prefix}_future_prediction_std.npy")
-        std_candidates.append("future_prediction_std.npy")
-        pred_std_path = None
-        for name in std_candidates:
-            p = config.predict_dir / name
-            if p.exists():
-                pred_std_path = p
-                break
-        if pred_std_path is None:
-            raise FileNotFoundError(f"future_prediction_std.npy is required when score_mode=zscore. Tried: {std_candidates}")
-        future_pred_std = np.load(pred_std_path)
-        if config.metric == "coherence":
-            score = (future_predictions - genuine_data) / (future_pred_std + 1e-8)
+            latent_candidates.append(f"{config.artifact_prefix}_future_predictions_latent.npy")
+            latent_std_candidates.append(f"{config.artifact_prefix}_future_prediction_latent_std.npy")
+        latent_candidates.append("future_predictions_latent.npy")
+        latent_std_candidates.append("future_prediction_latent_std.npy")
+
+        pred_latent_path = next(
+            (config.predict_dir / n for n in latent_candidates if (config.predict_dir / n).exists()), None
+        )
+        pred_latent_std_path = next(
+            (config.predict_dir / n for n in latent_std_candidates if (config.predict_dir / n).exists()), None
+        )
+
+        if pred_latent_path is not None and pred_latent_std_path is not None:
+            # Latent-space z-score: numerically stable and statistically correct.
+            pred_latent = np.load(pred_latent_path)
+            # pred_latent_std is the model distribution σ in logit-coherence
+            # space — NOT a phase_std value despite the similar name.
+            pred_latent_std = np.load(pred_latent_std_path)
+
+            # Transform genuine observations to logit-coherence space.
+            # Both metrics map to the same latent space so the sign convention
+            # below is uniform: higher logit-coh means more stable/coherent.
+            # A positive z-score means the observation was MORE coherent than
+            # predicted (less change); negative means LESS coherent (more change).
+            genuine_latent = to_zscore_training_space(genuine_data, config.metric)
+            score = (genuine_latent - pred_latent) / (pred_latent_std + _SCORE_EPS)
+            score = score.astype(np.float32)
         else:
-            score = (genuine_data - future_predictions) / (future_pred_std + 1e-8)
-        score = score.astype(np.float32)
+            # Fallback: metric-space z-score (may produce extreme values near
+            # coherence extremes; present for backward compatibility only).
+            std_candidates = []
+            if config.artifact_prefix:
+                std_candidates.append(f"{config.artifact_prefix}_future_prediction_std.npy")
+            std_candidates.append("future_prediction_std.npy")
+            pred_std_path = None
+            for name in std_candidates:
+                p = config.predict_dir / name
+                if p.exists():
+                    pred_std_path = p
+                    break
+            if pred_std_path is None:
+                raise FileNotFoundError(
+                    f"future_prediction_latent_std.npy (preferred) or future_prediction_std.npy "
+                    f"is required when score_mode=zscore. Tried: {latent_std_candidates + std_candidates}"
+                )
+            future_pred_std = np.load(pred_std_path)
+            if config.metric == "coherence":
+                score = (future_predictions - genuine_data) / (future_pred_std + _SCORE_EPS)
+            else:
+                score = (genuine_data - future_predictions) / (future_pred_std + _SCORE_EPS)
+            score = score.astype(np.float32)
     elif resolved_mode == "direct":
         if config.metric == "coherence":
             score = (future_predictions - genuine_data).astype(np.float32)

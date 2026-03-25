@@ -137,6 +137,10 @@ def _show_predict_artifacts(predict_dir: Path, prefix: str, use_zscore: bool) ->
             f"{prefix}_best_vit_model.pth",
         ]
         if use_zscore:
+            # Latent-space (logit-coherence) prediction artifacts — preferred for z-score
+            names.append(f"{prefix}_future_predictions_latent.npy")
+            names.append(f"{prefix}_future_prediction_latent_std.npy")
+            # Metric-space uncertainty via delta method (kept for backward compat)
             names.append(f"{prefix}_future_prediction_std.npy")
     else:
         names = [
@@ -145,6 +149,8 @@ def _show_predict_artifacts(predict_dir: Path, prefix: str, use_zscore: bool) ->
             "best_vit_model.pth",
         ]
         if use_zscore:
+            names.append("future_predictions_latent.npy")
+            names.append("future_prediction_latent_std.npy")
             names.append("future_prediction_std.npy")
     print("  - artifacts:")
     for n in names:
