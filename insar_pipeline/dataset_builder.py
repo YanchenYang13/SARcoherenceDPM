@@ -55,7 +55,7 @@ def filter_adjacent_pairs(
     for obs in observations:
         _, date_pair, _ = obs
         master_dt, slave_dt = parse_date_pair(date_pair)
-        if (slave_dt - master_dt).days <= 13:
+        if (slave_dt - master_dt).days <= 48:
             adjacent.append(obs)
     return adjacent
 
