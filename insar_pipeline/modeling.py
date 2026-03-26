@@ -337,32 +337,37 @@ def _safe_sigmoid(values: np.ndarray) -> np.ndarray:
     return (1.0 / (1.0 + np.exp(-values))).astype(np.float32)
 
 
-def _phase_std_to_coherence(phase_std: np.ndarray, eps: float = 1e-6) -> np.ndarray:
+def _phase_std_to_coherence(phase_std: np.ndarray, eps: float = 1e-6, looks: float = 3.0) -> np.ndarray:
     std = np.clip(phase_std.astype(np.float32), eps, None)
-    denom = np.sqrt(1.0 + 2.0 * (std**2))
+    denom = np.sqrt(1.0 + 2.0 * looks * (std**2))
     coh = 1.0 / denom
     return np.clip(coh, eps, 1 - eps).astype(np.float32)
 
 
-def _coherence_to_phase_std(coh: np.ndarray, eps: float = 1e-6) -> np.ndarray:
+def _coherence_to_phase_std(coh: np.ndarray, eps: float = 1e-6, looks: float = 3.0) -> np.ndarray:
     c = np.clip(coh.astype(np.float32), eps, 1 - eps)
-    return np.sqrt((1.0 - c**2) / (2.0 * c**2 + eps)).astype(np.float32)
+    return np.sqrt((1.0 - c**2) / (2.0 * looks * c**2 + eps)).astype(np.float32)
 
 
 def to_zscore_training_space(values: np.ndarray, metric: str) -> np.ndarray:
     if metric == "coherence":
         return _safe_logit(values)
     if metric == "phase_std":
-        return _safe_logit(_phase_std_to_coherence(values))
+        # phase_std is already approximately Gaussian-distributed (range ~0 to 2.5).
+        # Empirical distribution analysis shows log() introduces left skew and
+        # logit(coherence) introduces severe right skew with extreme tails.
+        # The raw phase_std values are the best latent space for Gaussian NLL training.
+        # Robust scaler handles centering and scaling downstream.
+        return values.astype(np.float32)
     raise ValueError(f"Unsupported metric for zscore space: {metric}")
 
 
 def _from_zscore_training_space(values: np.ndarray, metric: str) -> np.ndarray:
-    coh = _safe_sigmoid(values)
     if metric == "coherence":
-        return coh.astype(np.float32)
+        return _safe_sigmoid(values).astype(np.float32)
     if metric == "phase_std":
-        return _coherence_to_phase_std(coh)
+        # Identity inverse: no nonlinear transform was applied.
+        return values.astype(np.float32)
     raise ValueError(f"Unsupported metric for zscore space: {metric}")
 
 

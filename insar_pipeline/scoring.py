@@ -100,10 +100,11 @@ def compute_and_save_score(config: ScoreConfig) -> Path:
 
     if resolved_mode == "zscore":
         # ------------------------------------------------------------------
-        # Preferred: compute z-score in logit-coherence (latent) space.
+        # Preferred: compute z-score in the model's latent space.
         #
-        # The RNN/GRU model is trained with Gaussian NLL in logit-coherence
-        # space, so the statistically correct z-score is:
+        # The RNN/GRU model is trained with Gaussian NLL in metric-specific
+        # latent space (logit-coherence for coherence; raw phase_std for
+        # phase_std), so the statistically correct z-score is:
         #
         #   z = (genuine_latent - pred_latent) / pred_latent_std
         #
@@ -133,17 +134,19 @@ def compute_and_save_score(config: ScoreConfig) -> Path:
         if pred_latent_path is not None and pred_latent_std_path is not None:
             # Latent-space z-score: numerically stable and statistically correct.
             pred_latent = np.load(pred_latent_path)
-            # pred_latent_std is the model distribution σ in logit-coherence
+            # pred_latent_std is the model distribution σ in latent
             # space — NOT a phase_std value despite the similar name.
             pred_latent_std = np.load(pred_latent_std_path)
 
-            # Transform genuine observations to logit-coherence space.
-            # Both metrics map to the same latent space so the sign convention
-            # below is uniform: higher logit-coh means more stable/coherent.
-            # A positive z-score means the observation was MORE coherent than
-            # predicted (less change); negative means LESS coherent (more change).
+            # Transform genuine observations to the model's latent space.
             genuine_latent = to_zscore_training_space(genuine_data, config.metric)
-            score = (genuine_latent - pred_latent) / (pred_latent_std + _SCORE_EPS)
+            # Score sign convention: larger positive value = more damage.
+            # coherence: damage -> genuine_latent decreases -> pred - genuine > 0
+            # phase_std: damage -> genuine_latent increases -> genuine - pred > 0
+            if config.metric == "coherence":
+                score = (pred_latent - genuine_latent) / (pred_latent_std + _SCORE_EPS)
+            else:
+                score = (genuine_latent - pred_latent) / (pred_latent_std + _SCORE_EPS)
             score = score.astype(np.float32)
         else:
             # Fallback: metric-space z-score (may produce extreme values near
