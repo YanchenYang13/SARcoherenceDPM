@@ -48,16 +48,39 @@ def parse_date_pair(date_pair: str) -> tuple[dt.datetime, dt.datetime]:
     return dt.datetime.strptime(master_str, "%Y%m%d"), dt.datetime.strptime(slave_str, "%Y%m%d")
 
 
+def _collect_sorted_unique_dates(
+    observations: list[tuple[dt.datetime, str, np.ndarray]],
+) -> list[dt.datetime]:
+    """Collect all unique acquisition dates from observations and return them sorted."""
+    unique_dates: set[dt.datetime] = set()
+    for _, date_pair, _ in observations:
+        master_dt, slave_dt = parse_date_pair(date_pair)
+        unique_dates.add(master_dt)
+        unique_dates.add(slave_dt)
+    return sorted(unique_dates)
+
+
 def filter_adjacent_pairs(
     observations: list[tuple[dt.datetime, str, np.ndarray]],
 ) -> list[tuple[dt.datetime, str, np.ndarray]]:
-    adjacent: list[tuple[dt.datetime, str, np.ndarray]] = []
-    for obs in observations:
-        _, date_pair, _ = obs
-        master_dt, slave_dt = parse_date_pair(date_pair)
-        if (slave_dt - master_dt).days <= 48:
-            adjacent.append(obs)
-    return adjacent
+    """Keep only observations whose date pair consists of consecutively-ordered
+    acquisition dates.
+
+    The correct definition of 'adjacent': collect all unique acquisition dates
+    from the full observation list, sort them chronologically, then only pairs
+    whose two dates are consecutive in that sorted order are adjacent.
+    This is data-driven and independent of any fixed time-interval threshold.
+    """
+    sorted_dates = _collect_sorted_unique_dates(observations)
+    adjacent_set: set[tuple[dt.datetime, dt.datetime]] = {
+        (sorted_dates[i], sorted_dates[i + 1])
+        for i in range(len(sorted_dates) - 1)
+    }
+    return [
+        obs
+        for obs in observations
+        if parse_date_pair(obs[1]) in adjacent_set
+    ]
 
 
 def select_adjacent_sequence_window(
@@ -347,3 +370,117 @@ def build_and_save_dataset(config: DatasetConfig) -> Path:
         with open(output_subfolder / "matrix_pairs.pkl", "wb") as f:
             pickle.dump([obs[1] for obs in matrix_observations], f)
     return output_subfolder
+
+
+def validate_datasets(output_dir: Path) -> None:
+    """Validate and print a structured summary of all datasets found under output_dir.
+
+    For each dataset directory containing rnn_data.npy and dates.pkl, prints:
+    - dataset name
+    - rnn_data shape (H, W, T)
+    - number of time steps T
+    - list of date pairs used
+    - score observation shape
+    - whether all expected files exist
+
+    Also prints a cross-dataset consistency check: all datasets should have
+    the same (H, W) spatial dimensions and the same time steps if they share
+    the same source dates.
+    """
+    REQUIRED_FILES = ["rnn_data.npy", "dates.pkl", "score_observation.npy"]
+    OPTIONAL_FILES = ["rnn_data_std.npy", "score_observation_std.npy"]
+
+    dataset_dirs = sorted([
+        d for d in output_dir.iterdir()
+        if d.is_dir() and (d / "rnn_data.npy").exists() and (d / "dates.pkl").exists()
+    ])
+
+    if not dataset_dirs:
+        print(f"[validate_dataset] No datasets found under {output_dir}")
+        return
+
+    print(f"\n{'=' * 72}")
+    print(f"[validate_dataset] Found {len(dataset_dirs)} dataset(s) under {output_dir}")
+    print(f"{'=' * 72}")
+
+    summary_rows = []
+
+    for ds_dir in dataset_dirs:
+        print(f"\n  Dataset: {ds_dir.name}")
+        print(f"  {'─' * 60}")
+
+        # Check required files
+        missing = [f for f in REQUIRED_FILES if not (ds_dir / f).exists()]
+        optional_present = [f for f in OPTIONAL_FILES if (ds_dir / f).exists()]
+
+        if missing:
+            print(f"  ⚠️  Missing required files: {missing}")
+        else:
+            print(f"  ✅ All required files present")
+
+        for f in optional_present:
+            print(f"  ℹ️  Optional file present: {f}")
+
+        # Load dates
+        with open(ds_dir / "dates.pkl", "rb") as f:
+            dates = pickle.load(f)
+        print(f"  time_steps : {len(dates)}")
+        for d in dates:
+            print(f"    - {d}")
+
+        # Load rnn_data shape
+        rnn_data = np.load(ds_dir / "rnn_data.npy", mmap_mode="r")
+        print(f"  rnn_data   : shape={rnn_data.shape}  dtype={rnn_data.dtype}")
+        if rnn_data.ndim == 3:
+            H, W, T = rnn_data.shape
+        elif rnn_data.ndim == 2:
+            H, W, T = rnn_data.shape[0], rnn_data.shape[1], 1
+        else:
+            print(f"  ⚠️  Unexpected rnn_data ndim={rnn_data.ndim}; skipping shape unpack")
+            H, W, T = 0, 0, 0
+
+        # Load score_observation shape
+        score_obs_path = ds_dir / "score_observation.npy"
+        if score_obs_path.exists():
+            obs = np.load(score_obs_path, mmap_mode="r")
+            print(f"  score_obs  : shape={obs.shape}  dtype={obs.dtype}")
+        else:
+            print(f"  ⚠️  score_observation.npy not found for {ds_dir.name}")
+
+        summary_rows.append({
+            "name": ds_dir.name,
+            "shape": rnn_data.shape,
+            "T": T,
+            "H": H,
+            "W": W,
+            "missing": missing,
+        })
+
+    # Cross-dataset consistency check
+    print(f"\n{'=' * 72}")
+    print("[validate_dataset] Cross-dataset consistency check")
+    print(f"{'=' * 72}")
+
+    shapes_hw = set((r["H"], r["W"]) for r in summary_rows)
+    shapes_t  = set(r["T"] for r in summary_rows)
+
+    if len(shapes_hw) == 1:
+        print(f"  ✅ Spatial dimensions consistent: {shapes_hw.pop()}")
+    else:
+        print(f"  ❌ Spatial dimension mismatch: {shapes_hw}")
+
+    if len(shapes_t) == 1:
+        print(f"  ✅ Time steps consistent across all datasets: T={shapes_t.pop()}")
+    else:
+        print(f"  ⚠️  Time steps differ across datasets:")
+        for r in summary_rows:
+            flag = "✅" if not r["missing"] else "❌"
+            print(f"    {flag} {r['name']:50s}  T={r['T']}  shape={r['shape']}")
+
+    any_missing = [r for r in summary_rows if r["missing"]]
+    if any_missing:
+        print(f"\n  ❌ {len(any_missing)} dataset(s) have missing files:")
+        for r in any_missing:
+            print(f"    - {r['name']}: missing {r['missing']}")
+    else:
+        print(f"\n  ✅ No missing files in any dataset")

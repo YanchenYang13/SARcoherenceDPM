@@ -34,6 +34,7 @@ STEP_CHOICES = [
     "ccd_build_stack",
     "ccd_run",
     "ccd_full",
+    "validate_dataset",
 ]
 
 
@@ -536,6 +537,12 @@ def run_step(args: argparse.Namespace) -> None:
         _kv("ccd_dataset_dir", ccd_dataset_dir)
         _kv("probability_map", prob_path)
         _kv("change_map", change_path)
+        return
+
+    if args.step == "validate_dataset":
+        from .dataset_builder import validate_datasets
+        _kv("output_dir", args.output_dir)
+        validate_datasets(args.output_dir)
         return
 
     raise ValueError(f"Unsupported step: {args.step}")
