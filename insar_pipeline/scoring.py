@@ -108,6 +108,7 @@ def calculate_log_ndi(
     return score.astype(np.float32)
 
 
+def compute_and_save_score(config: ScoreConfig) -> Path:
     # Method-specific score fallback (e.g., temporal CCD already outputs probability map)
     if config.score_mode == "auto" and config.artifact_prefix:
         ccd_prob = config.predict_dir / f"{config.artifact_prefix}_probability.npy"
