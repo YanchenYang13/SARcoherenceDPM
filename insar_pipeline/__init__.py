@@ -9,6 +9,7 @@ from .coherence import (
     write_isce_bip_cor,
 )
 from .dataset_builder import DatasetConfig, build_and_save_dataset, collect_pair_observations
+from .histogram_matching import histogram_match_timeseries
 from .isce_stack import StackPairProduct, discover_stack_pair_products, read_isce_int
 from .int_auxiliary import (
     IntAuxiliaryConfig,
@@ -46,6 +47,7 @@ __all__ = [
     "DatasetConfig",
     "collect_pair_observations",
     "build_and_save_dataset",
+    "histogram_match_timeseries",
     "TrainingConfig",
     "run_training_and_prediction",
     "ScoreConfig",

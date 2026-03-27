@@ -33,6 +33,8 @@ class DatasetConfig:
     observation_file: str = "filt_fine.cor"
     dataset_name: str | None = None
     save_legacy_aliases: bool = True
+    histogram_match: bool = False
+    histogram_match_strategy: str = "median"
 
 
 def _observation_metric(observation_file: str) -> str:
@@ -354,6 +356,11 @@ def build_and_save_dataset(config: DatasetConfig) -> Path:
     )
 
     timeseries, dates = build_insar_timeseries_from_observations(train_observations)
+
+    if config.histogram_match and timeseries.shape[2] > 1:
+        from .histogram_matching import histogram_match_timeseries
+        timeseries = histogram_match_timeseries(timeseries, strategy=config.histogram_match_strategy)
+
     geninue_data = observations[-1][2]
 
     output_subfolder = config.output_dir / (config.dataset_name or _default_dataset_name(config.observation_file))

@@ -21,7 +21,7 @@ class ScoreConfig:
     metric: Literal["phase_std", "coherence"] = "phase_std"
     use_zscore: bool = False
     artifact_prefix: str = ""
-    score_mode: Literal["auto", "direct", "ndi", "zscore"] = "auto"
+    score_mode: Literal["auto", "direct", "ndi", "log_ndi", "zscore"] = "auto"
 
 
 def calculate_difference(
@@ -64,7 +64,50 @@ def _resolve_observation_filename(dataset_dir: Path, metric: str) -> str:
             return name
     raise FileNotFoundError(f"No score observation file found in {dataset_dir}. Tried: {candidates}")
 
-def compute_and_save_score(config: ScoreConfig) -> Path:
+
+def calculate_log_ndi(
+    observed: np.ndarray,
+    predicted: np.ndarray,
+    metric: str = "phase_std",
+    eps: float = 1e-8,
+) -> np.ndarray:
+    """Compute log-NDI (log-ratio) damage score.
+
+    For phase_std: damage increases phase_std, so log(observed / predicted) > 0
+    for damaged pixels.
+    For coherence: damage decreases coherence, so log(predicted / observed) > 0
+    for damaged pixels.
+
+    Both arrays are clamped to [eps, ∞) before taking the log.
+
+    Parameters
+    ----------
+    observed  : ndarray (H, W)
+    predicted : ndarray (H, W)
+    metric    : "phase_std" | "coherence"
+    eps       : small value to avoid log(0)
+
+    Returns
+    -------
+    score : ndarray (H, W), float32
+    """
+    no_data = (
+        ~np.isfinite(observed) | (np.asarray(observed) == 0)
+        | ~np.isfinite(predicted) | (np.asarray(predicted) == 0)
+    )
+
+    obs_c = np.maximum(np.abs(observed).astype(np.float64), eps)
+    pred_c = np.maximum(np.abs(predicted).astype(np.float64), eps)
+
+    if metric == "coherence":
+        score = np.log(pred_c / obs_c)
+    else:
+        score = np.log(obs_c / pred_c)
+
+    score[no_data] = np.nan
+    return score.astype(np.float32)
+
+
     # Method-specific score fallback (e.g., temporal CCD already outputs probability map)
     if config.score_mode == "auto" and config.artifact_prefix:
         ccd_prob = config.predict_dir / f"{config.artifact_prefix}_probability.npy"
@@ -177,6 +220,12 @@ def compute_and_save_score(config: ScoreConfig) -> Path:
             score = (future_predictions - genuine_data).astype(np.float32)
         else:
             score = (genuine_data - future_predictions).astype(np.float32)
+    elif resolved_mode == "log_ndi":
+        score = calculate_log_ndi(
+            genuine_data,
+            future_predictions,
+            metric=config.metric,
+        )
     else:  # ndi
         score = calculate_difference(
             genuine_data,
