@@ -130,9 +130,11 @@ def select_matrix_pair_window(
 
 def _find_observation_files_sorted(cropped_dir: Path, observation_file: str) -> list[tuple[dt.datetime, str, Path]]:
     file_infos = []
-    pattern = f"*{observation_file}"
-    for path in cropped_dir.rglob(pattern):
-        m = re.search(r"(\d{8}_\d{8})", path.name)
+    for path in cropped_dir.glob(f"*_{observation_file}"):  
+        m = re.fullmatch(                                
+            rf"(\d{{8}}_\d{{8}})_{re.escape(observation_file)}",
+            path.name,
+        )
         if not m:
             continue
         date_str = m.group(1)
