@@ -10,6 +10,7 @@ from typing import Literal
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 
@@ -172,7 +173,12 @@ class InSARDataset(Dataset):
 
 
 class InSARLSTM(nn.Module):
-    """LSTM with gated time-feature fusion and true notime bypass."""
+    """LSTM with additive residual gated time-feature fusion and true notime bypass.
+
+    Time fusion uses additive residual (src_embed + gate * time_embed) rather than
+    weighted interpolation.  This preserves the source signal while allowing
+    the learned gate to control how much temporal context is injected.
+    """
 
     def __init__(self, input_dim=1, hidden_dim=64, num_layers=2, dropout=0.1, time_feat_dim=8):
         super().__init__()
@@ -213,7 +219,7 @@ class InSARLSTM(nn.Module):
             time_embed = self.time_embedding(time_features)
             gate_input = torch.cat([src_embed, time_embed], dim=-1)
             gate = self.fusion_gate(gate_input)
-            combined_input = gate * src_embed + (1 - gate) * time_embed
+            combined_input = src_embed + gate * time_embed
             combined_input = self.layer_norm(combined_input)
         else:
             combined_input = self.layer_norm(src_embed)
@@ -231,7 +237,12 @@ class InSARLSTM(nn.Module):
 
 
 class InSARGRU(nn.Module):
-    """GRU variant with the same gated-fusion improvements."""
+    """GRU variant with additive residual gated time-feature fusion.
+
+    Time fusion uses additive residual (src_embed + gate * time_embed) rather than
+    weighted interpolation.  This preserves the source signal while allowing
+    the learned gate to control how much temporal context is injected.
+    """
 
     def __init__(self, input_dim=1, hidden_dim=64, num_layers=2, dropout=0.1, time_feat_dim=8):
         super().__init__()
@@ -270,7 +281,7 @@ class InSARGRU(nn.Module):
             time_embed = self.time_embedding(time_features)
             gate_input = torch.cat([src_embed, time_embed], dim=-1)
             gate = self.fusion_gate(gate_input)
-            combined_input = gate * src_embed + (1 - gate) * time_embed
+            combined_input = src_embed + gate * time_embed
             combined_input = self.layer_norm(combined_input)
         else:
             combined_input = self.layer_norm(src_embed)
@@ -301,6 +312,129 @@ class InSARDistributionHead(nn.Module):
         return mu, logvar
 
 
+class CausalConv1d(nn.Module):
+    """1D convolution with causal (left-only) padding to prevent future leakage."""
+
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: int, dilation: int = 1):
+        super().__init__()
+        self._pad = (kernel_size - 1) * dilation
+        self.conv = nn.Conv1d(in_channels, out_channels, kernel_size, dilation=dilation, padding=0)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, C, T)
+        x = F.pad(x, (self._pad, 0))
+        return self.conv(x)
+
+
+class TCNBlock(nn.Module):
+    """Residual TCN block: two CausalConv1d layers + LayerNorm + GELU + dropout."""
+
+    def __init__(self, channels: int, kernel_size: int, dilation: int, dropout: float = 0.1):
+        super().__init__()
+        self.conv1 = CausalConv1d(channels, channels, kernel_size, dilation)
+        self.norm1 = nn.LayerNorm(channels)
+        self.conv2 = CausalConv1d(channels, channels, kernel_size, dilation)
+        self.norm2 = nn.LayerNorm(channels)
+        self.drop = nn.Dropout(dropout)
+        self.act = nn.GELU()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, T, C)  ← channel-last convention for LayerNorm
+        residual = x
+        # Conv1d expects (B, C, T)
+        out = self.conv1(x.permute(0, 2, 1)).permute(0, 2, 1)
+        out = self.act(self.norm1(out))
+        out = self.drop(out)
+        out = self.conv2(out.permute(0, 2, 1)).permute(0, 2, 1)
+        out = self.norm2(out)
+        out = self.drop(out)
+        return self.act(out + residual)
+
+
+class InSARTCN(nn.Module):
+    """Temporal Convolutional Network for InSAR time series.
+
+    Preferred over LSTM/GRU for short sequences (~10 steps) because causal
+    dilated convolutions cover the full receptive field in a single forward
+    pass without sequential hidden-state propagation.
+
+    Receptive field for num_layers=3, kernel_size=3 (exponential dilation [1,2,4]):
+        Each TCNBlock contributes 2*(kernel_size-1)*dilation to the RF.
+        Total RF = 1 + 2*(3-1)*(1+2+4) = 29  >>  10  (covers full sequence)
+
+    Uses additive residual gated fusion for time features:
+        combined = src_embed + gate * time_embed
+    This prevents signal dilution: the source embedding is preserved and time
+    information is added proportionally to the learned gate values.
+
+    Interface is identical to InSARLSTM / InSARGRU.
+    """
+
+    def __init__(
+        self,
+        input_dim: int = 1,
+        hidden_dim: int = 64,
+        num_layers: int = 3,
+        dropout: float = 0.1,
+        time_feat_dim: int = 8,
+        kernel_size: int = 3,
+    ):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+
+        self.input_embedding = nn.Linear(input_dim, hidden_dim)
+        self.time_embedding = nn.Linear(time_feat_dim, hidden_dim)
+
+        self.fusion_gate = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.Sigmoid(),
+        )
+        self.layer_norm = nn.LayerNorm(hidden_dim)
+
+        # Exponential dilation: [1, 2, 4, ...]
+        self.tcn_blocks = nn.ModuleList([
+            TCNBlock(hidden_dim, kernel_size, dilation=2 ** i, dropout=dropout)
+            for i in range(num_layers)
+        ])
+
+        self.target_time_proj = nn.Linear(time_feat_dim, hidden_dim)
+        self.output_layer = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, 1),
+        )
+
+    def forward(self, src: torch.Tensor, time_features: torch.Tensor, target_time_features: torch.Tensor) -> torch.Tensor:
+        # src: (B, T)
+        src_embed = self.input_embedding(src.unsqueeze(-1))  # (B, T, hidden_dim)
+
+        time_active = time_features.abs().sum() > 0
+
+        if time_active:
+            time_embed = self.time_embedding(time_features)  # (B, T, hidden_dim)
+            gate_input = torch.cat([src_embed, time_embed], dim=-1)
+            gate = self.fusion_gate(gate_input)             # (B, T, hidden_dim)
+            combined_input = src_embed + gate * time_embed  # additive residual
+            combined_input = self.layer_norm(combined_input)
+        else:
+            combined_input = self.layer_norm(src_embed)
+
+        out = combined_input
+        for block in self.tcn_blocks:
+            out = block(out)
+
+        seq_repr = out[:, -1, :]  # (B, hidden_dim) — last time step
+
+        if time_active:
+            target_time_embed = self.target_time_proj(target_time_features)  # (B, hidden_dim)
+            combined = torch.cat([seq_repr, target_time_embed], dim=-1)
+        else:
+            combined = torch.cat([seq_repr, torch.zeros_like(seq_repr)], dim=-1)
+
+        return self.output_layer(combined).squeeze(-1)
+
+
 @dataclass
 class TrainingConfig:
     dataset_dir: Path
@@ -311,7 +445,7 @@ class TrainingConfig:
     pred_batch_size: int = 256
     lr: float = 1e-3
     metric: Literal["phase_std", "coherence"] = "phase_std"
-    model_type: Literal["lstm", "gru"] = "lstm"
+    model_type: Literal["lstm", "gru", "tcn"] = "lstm"
     use_timestamp: bool = True
     use_zscore: bool = False
     hidden_dim: int = 64
@@ -321,6 +455,7 @@ class TrainingConfig:
     weight_decay: float = 0.0
     max_grad_norm: float | None = None
     artifact_prefix: str = ""
+    loss_type: Literal["mse", "huber"] = "mse"
 
 
 def _artifact_name(prefix: str, base_name: str) -> str:
@@ -623,6 +758,8 @@ def _build_model(config: TrainingConfig) -> nn.Module:
     model_kwargs = dict(hidden_dim=config.hidden_dim, num_layers=config.num_layers, dropout=config.dropout)
     if config.model_type == "gru":
         return InSARGRU(**model_kwargs)
+    if config.model_type == "tcn":
+        return InSARTCN(**model_kwargs, kernel_size=3)
     return InSARLSTM(**model_kwargs)
 
 
@@ -688,7 +825,12 @@ def run_training_and_prediction(config: TrainingConfig) -> Path:
 
     base_model = _build_model(config)
     model = InSARDistributionHead(base_model) if config.use_zscore else base_model
-    criterion = _normal_nll if config.use_zscore else nn.MSELoss()
+    if config.use_zscore:
+        criterion = _normal_nll
+    elif config.loss_type == "huber":
+        criterion = nn.SmoothL1Loss()
+    else:
+        criterion = nn.MSELoss()
     if config.optimizer == "adamw":
         optimizer = optim.AdamW(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
     else:
