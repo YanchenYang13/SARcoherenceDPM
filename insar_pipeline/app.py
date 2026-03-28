@@ -242,6 +242,7 @@ def run_step(args: argparse.Namespace) -> None:
         _kv("optimizer", args.optimizer)
         _kv("weight_decay", args.weight_decay)
         _kv("max_grad_norm", args.max_grad_norm)
+        _kv("tcn_kernel_size", args.tcn_kernel_size)
         predict_dir = run_training_and_prediction(
             TrainingConfig(
                 dataset_dir=dataset_dir,
@@ -263,6 +264,7 @@ def run_step(args: argparse.Namespace) -> None:
                 max_grad_norm=args.max_grad_norm,
                 artifact_prefix=prefix,
                 loss_type=args.loss_type,
+                tcn_kernel_size=args.tcn_kernel_size,
             )
         )
         _show_predict_artifacts(predict_dir, prefix, args.use_zscore)
@@ -627,6 +629,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--disable-timestamp", action="store_true", help="Disable dates.pkl time feature inputs.")
     parser.add_argument("--use-zscore", action="store_true", help="Enable logit+distribution prediction and zscore scoring.")
     parser.add_argument("--loss-type", choices=["mse", "huber"], default="mse", help="Loss function for RNN training (mse or huber).")
+    parser.add_argument("--tcn-kernel-size", type=int, default=3, help="Kernel size for TCN causal convolutions (default: 3). Larger values increase per-layer receptive field.")
 
     parser.add_argument("--vit-matrix-mode", choices=["similarity", "outer", "difference"], default="similarity")
     parser.add_argument("--vit-patch-size", type=int, default=2)

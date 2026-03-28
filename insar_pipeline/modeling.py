@@ -456,6 +456,7 @@ class TrainingConfig:
     max_grad_norm: float | None = None
     artifact_prefix: str = ""
     loss_type: Literal["mse", "huber"] = "mse"
+    tcn_kernel_size: int = 3
 
 
 def _artifact_name(prefix: str, base_name: str) -> str:
@@ -759,7 +760,7 @@ def _build_model(config: TrainingConfig) -> nn.Module:
     if config.model_type == "gru":
         return InSARGRU(**model_kwargs)
     if config.model_type == "tcn":
-        return InSARTCN(**model_kwargs, kernel_size=3)
+        return InSARTCN(**model_kwargs, kernel_size=config.tcn_kernel_size)
     return InSARLSTM(**model_kwargs)
 
 
