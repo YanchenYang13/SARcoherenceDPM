@@ -27,6 +27,7 @@ class InSARDataset(Dataset):
         scaler_type: str = "robust",
         prefit_scaler_center: np.ndarray | None = None,
         prefit_scaler_scale: np.ndarray | None = None,
+        stepwise: bool = False,
     ):
         self.data = data
         self.height, self.width, self.time_steps = data.shape
@@ -34,6 +35,7 @@ class InSARDataset(Dataset):
         self.use_timestamp = use_timestamp
         self.use_zscore = use_zscore
         self.metric = metric
+        self.stepwise = stepwise
 
         # -----------------------------------------------------------------
         # IMPROVED time-feature encoding (dim=8)
@@ -101,6 +103,11 @@ class InSARDataset(Dataset):
         if prefit_scaler_center is not None and prefit_scaler_scale is not None:
             self.scaler_center = prefit_scaler_center
             self.scaler_scale = prefit_scaler_scale
+        elif scaler_type == "none":
+            # Identity transform: skip all per-pixel scaling computation.
+            # Data is used as-is (raw or histogram-matched values).
+            self.scaler_center = np.zeros((self.height, self.width), dtype=np.float32)
+            self.scaler_scale = np.ones((self.height, self.width), dtype=np.float32)
         else:
             # Apply zscore transform before computing scaler statistics so
             # that the scaler operates in logit-coherence space.
@@ -147,6 +154,26 @@ class InSARDataset(Dataset):
     def __getitem__(self, idx):
         i, j = self.samples[idx]
         pixel_ts = self.scaled_data[i, j, :]
+
+        if self.stepwise:
+            # Stepwise mode: return full sequence; the model handles the shift.
+            if not self.is_prediction:
+                time_feat = self.time_features
+                target_time_feat = self.time_features[-1]
+            else:
+                time_feat = self.time_features[: self.time_steps]
+                target_time_feat = self.time_features[-1]
+
+            if not self.use_timestamp:
+                time_feat = np.zeros_like(time_feat, dtype=np.float32)
+                target_time_feat = np.zeros_like(target_time_feat, dtype=np.float32)
+
+            return {
+                "pixel_coords": torch.tensor([i, j]),
+                "sequence": torch.tensor(pixel_ts, dtype=torch.float32),
+                "time_features": torch.tensor(time_feat, dtype=torch.float32),
+                "target_time_features": torch.tensor(target_time_feat, dtype=torch.float32),
+            }
 
         if not self.is_prediction:
             x = pixel_ts[:-1]
@@ -435,6 +462,112 @@ class InSARTCN(nn.Module):
         return self.output_layer(combined).squeeze(-1)
 
 
+class InSARStepwiseGRU(nn.Module):
+    """GRU with stepwise prediction, inspired by dpm-rnn-public.
+
+    Predicts x_t from h_{t-1} at every time step, providing T supervision
+    signals per pixel instead of 1.  Uses gated additive residual time-feature
+    fusion (the same pattern as InSARGRU) applied before the GRU input.
+
+    In training mode (generate_mode=False) the shifted hidden states
+    [h_0, h_1, ..., h_{T-1}] are decoded to predict [x_1, ..., x_T].
+    In generate mode (generate_mode=True) [h_0, ..., h_T] are decoded to
+    additionally predict x_{T+1} — the co-event step.
+
+    Args:
+        input_dim: Raw input channels (1 for coherence / phase_std).
+        hidden_dim: GRU hidden state and input-embedding width.
+        num_layers: Number of stacked GRU layers.
+        dropout: Dropout probability (only applied when num_layers > 1).
+        time_feat_dim: Dimensionality of the time-feature vector.
+        fc_dim: Width of each layer in the 3-layer FC decoder.
+    """
+
+    def __init__(
+        self,
+        input_dim: int = 1,
+        hidden_dim: int = 256,
+        num_layers: int = 1,
+        dropout: float = 0.1,
+        time_feat_dim: int = 8,
+        fc_dim: int = 128,
+    ):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.input_embedding = nn.Linear(input_dim, hidden_dim)
+        self.time_embedding = nn.Linear(time_feat_dim, hidden_dim)
+        self.fusion_gate = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.Sigmoid(),
+        )
+        self.gru = nn.GRU(
+            input_size=hidden_dim,
+            hidden_size=hidden_dim,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=dropout if num_layers > 1 else 0,
+        )
+        # 3-layer FC decoder: hidden_dim → fc_dim → fc_dim → fc_dim → input_dim
+        self.dec_fc = nn.Sequential(
+            nn.Linear(hidden_dim, fc_dim),
+            nn.ReLU(),
+            nn.Linear(fc_dim, fc_dim),
+            nn.ReLU(),
+            nn.Linear(fc_dim, fc_dim),
+            nn.ReLU(),
+        )
+        self.dec_mean = nn.Linear(fc_dim, input_dim)
+
+    def forward(
+        self,
+        src: torch.Tensor,
+        time_features: torch.Tensor,
+        target_time_features: torch.Tensor,
+        generate_mode: bool = False,
+    ) -> torch.Tensor:
+        """Stepwise forward pass.
+
+        Args:
+            src: (B, T) raw input values.
+            time_features: (B, T, time_feat_dim) per-step time features.
+            target_time_features: (B, time_feat_dim) time features for step
+                T+1 (accepted for interface compatibility; time features for
+                all T steps are fused at the GRU input stage).
+            generate_mode: If True, also predict step T+1 using h_T.
+
+        Returns:
+            pred: (B, T, 1) for generate_mode=False, or (B, T+1, 1) for
+                generate_mode=True where the last slice is the co-event
+                prediction.
+        """
+        B, T = src.shape
+        src_embed = self.input_embedding(src.unsqueeze(-1))  # (B, T, hidden_dim)
+
+        time_active = time_features.abs().sum() > 0
+        if time_active:
+            time_embed = self.time_embedding(time_features)  # (B, T, hidden_dim)
+            gate_input = torch.cat([src_embed, time_embed], dim=-1)
+            gate = self.fusion_gate(gate_input)
+            combined_input = src_embed + gate * time_embed
+        else:
+            combined_input = src_embed
+
+        output, _ = self.gru(combined_input)  # output: (B, T, hidden_dim)
+
+        # Shift: use h_{t-1} to predict x_t.
+        h_0 = torch.zeros(B, 1, self.hidden_dim, device=output.device, dtype=output.dtype)
+        if generate_mode:
+            # [h_0, h_1, ..., h_T]: (B, T+1, hidden_dim) — includes h_T for x_{T+1}
+            shifted = torch.cat([h_0, output], dim=1)
+        else:
+            # [h_0, h_1, ..., h_{T-1}]: (B, T, hidden_dim)
+            shifted = torch.cat([h_0, output[:, :-1, :]], dim=1)
+
+        fc_out = self.dec_fc(shifted)      # (B, T or T+1, fc_dim)
+        pred = self.dec_mean(fc_out)       # (B, T or T+1, 1)
+        return pred
+
+
 @dataclass
 class TrainingConfig:
     dataset_dir: Path
@@ -445,7 +578,7 @@ class TrainingConfig:
     pred_batch_size: int = 256
     lr: float = 1e-3
     metric: Literal["phase_std", "coherence"] = "phase_std"
-    model_type: Literal["lstm", "gru", "tcn"] = "lstm"
+    model_type: Literal["lstm", "gru", "tcn", "stepwise_gru"] = "lstm"
     use_timestamp: bool = True
     use_zscore: bool = False
     hidden_dim: int = 64
@@ -457,6 +590,7 @@ class TrainingConfig:
     artifact_prefix: str = ""
     loss_type: Literal["mse", "huber"] = "mse"
     tcn_kernel_size: int = 3
+    scaler_type: str = "robust"  # "robust" | "minmax" | "none"
 
 
 def _artifact_name(prefix: str, base_name: str) -> str:
@@ -530,6 +664,16 @@ def _normal_nll(mu: torch.Tensor, logvar: torch.Tensor, target: torch.Tensor) ->
     return (0.5 * (logvar + ((target - mu) ** 2) / var)).mean()
 
 
+def _stepwise_mse(pred_all_steps: torch.Tensor, target_all_steps: torch.Tensor) -> torch.Tensor:
+    """Stepwise MSE averaged over all T time steps and batch samples.
+
+    Args:
+        pred_all_steps: (B, T, 1) model predictions for steps 1..T.
+        target_all_steps: (B, T, 1) ground-truth values for steps 1..T.
+    """
+    return ((pred_all_steps - target_all_steps) ** 2).mean()
+
+
 def _zscore_space_to_metric_std_vec(
     std_in_zspace: np.ndarray, z_value: np.ndarray, metric: str
 ) -> np.ndarray:
@@ -577,29 +721,46 @@ def train_model(
         epoch_loss = 0.0
         first_batch_logged = False
         for batch in train_loader:
-            x = batch["x"].to(device, non_blocking=device.type == "cuda")
-            time_features = batch["time_features"].to(device, non_blocking=device.type == "cuda")
-            target_time_features = batch["target_time_features"].to(device, non_blocking=device.type == "cuda")
-            y = batch["y"].to(device, non_blocking=device.type == "cuda")
-
-            optimizer.zero_grad()
-            outputs = model(x, time_features, target_time_features)
-            if isinstance(outputs, tuple):
-                loss = criterion(outputs[0], outputs[1], y)
+            non_blocking = device.type == "cuda"
+            if "sequence" in batch:
+                # Stepwise training: full sequence in, per-step predictions out.
+                seq = batch["sequence"].to(device, non_blocking=non_blocking)
+                time_features = batch["time_features"].to(device, non_blocking=non_blocking)
+                target_time_features = batch["target_time_features"].to(device, non_blocking=non_blocking)
+                optimizer.zero_grad()
+                outputs = model(seq, time_features, target_time_features, generate_mode=False)
+                target = seq.unsqueeze(-1)  # (B, T, 1)
+                loss = criterion(outputs, target)
+                if not first_batch_logged:
+                    first_batch_logged = True
+                    print(
+                        f"[RNN] first_train_batch device={seq.device} "
+                        f"batch_shape={tuple(seq.shape)} target_shape={tuple(target.shape)}",
+                        flush=True,
+                    )
             else:
-                loss = criterion(outputs, y)
+                x = batch["x"].to(device, non_blocking=non_blocking)
+                time_features = batch["time_features"].to(device, non_blocking=non_blocking)
+                target_time_features = batch["target_time_features"].to(device, non_blocking=non_blocking)
+                y = batch["y"].to(device, non_blocking=non_blocking)
+                optimizer.zero_grad()
+                outputs = model(x, time_features, target_time_features)
+                if isinstance(outputs, tuple):
+                    loss = criterion(outputs[0], outputs[1], y)
+                else:
+                    loss = criterion(outputs, y)
+                if not first_batch_logged:
+                    first_batch_logged = True
+                    print(
+                        f"[RNN] first_train_batch device={x.device} "
+                        f"batch_shape={tuple(x.shape)} target_shape={tuple(y.shape)}",
+                        flush=True,
+                    )
             loss.backward()
             if max_grad_norm is not None and max_grad_norm > 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
             optimizer.step()
             epoch_loss += loss.item()
-            if not first_batch_logged:
-                first_batch_logged = True
-                print(
-                    f"[RNN] first_train_batch device={x.device} "
-                    f"batch_shape={tuple(x.shape)} target_shape={tuple(y.shape)}",
-                    flush=True,
-                )
 
         scheduler.step()
 
@@ -607,16 +768,26 @@ def train_model(
         val_loss = 0.0
         with torch.no_grad():
             for batch in val_loader:
-                x = batch["x"].to(device, non_blocking=device.type == "cuda")
-                time_features = batch["time_features"].to(device, non_blocking=device.type == "cuda")
-                target_time_features = batch["target_time_features"].to(device, non_blocking=device.type == "cuda")
-                y = batch["y"].to(device, non_blocking=device.type == "cuda")
-                outputs = model(x, time_features, target_time_features)
-                if isinstance(outputs, tuple):
-                    loss = criterion(outputs[0], outputs[1], y)
+                non_blocking = device.type == "cuda"
+                if "sequence" in batch:
+                    seq = batch["sequence"].to(device, non_blocking=non_blocking)
+                    time_features = batch["time_features"].to(device, non_blocking=non_blocking)
+                    target_time_features = batch["target_time_features"].to(device, non_blocking=non_blocking)
+                    outputs = model(seq, time_features, target_time_features, generate_mode=False)
+                    target = seq.unsqueeze(-1)
+                    loss = criterion(outputs, target)
+                    val_loss += loss.item() * seq.size(0)
                 else:
-                    loss = criterion(outputs, y)
-                val_loss += loss.item() * x.size(0)
+                    x = batch["x"].to(device, non_blocking=non_blocking)
+                    time_features = batch["time_features"].to(device, non_blocking=non_blocking)
+                    target_time_features = batch["target_time_features"].to(device, non_blocking=non_blocking)
+                    y = batch["y"].to(device, non_blocking=non_blocking)
+                    outputs = model(x, time_features, target_time_features)
+                    if isinstance(outputs, tuple):
+                        loss = criterion(outputs[0], outputs[1], y)
+                    else:
+                        loss = criterion(outputs, y)
+                    val_loss += loss.item() * x.size(0)
         val_loss /= len(val_loader.dataset)
 
         current_lr = scheduler.get_last_lr()[0]
@@ -701,19 +872,29 @@ def predict_future(
             pixel_is = coords[:, 0]
             pixel_js = coords[:, 1]
 
-            x = batch["x"].to(device)
-            time_features = batch["time_features"].to(device)
-            target_time_features = batch["target_time_features"].to(device)
-            outputs = model(x, time_features, target_time_features)
-
-            if isinstance(outputs, tuple):
-                pred_mean, pred_logvar = outputs
-                mean_np = pred_mean.cpu().numpy()  # (B,) — scaled-space mean
-                # pred_dist_std: distribution std in *scaled* space (not phase_std!)
-                pred_dist_std_np = torch.exp(0.5 * pred_logvar).cpu().numpy()  # (B,)
-            else:
-                mean_np = outputs.cpu().numpy()  # (B,)
+            if "sequence" in batch:
+                # Stepwise model: run in generate_mode to predict the T+1 co-event step.
+                seq = batch["sequence"].to(device)
+                time_features = batch["time_features"].to(device)
+                target_time_features = batch["target_time_features"].to(device)
+                outputs = model(seq, time_features, target_time_features, generate_mode=True)
+                # outputs: (B, T+1, 1) — last slice is the co-event prediction
+                mean_np = outputs[:, -1, 0].cpu().numpy()  # (B,)
                 pred_dist_std_np = None
+            else:
+                x = batch["x"].to(device)
+                time_features = batch["time_features"].to(device)
+                target_time_features = batch["target_time_features"].to(device)
+                outputs = model(x, time_features, target_time_features)
+
+                if isinstance(outputs, tuple):
+                    pred_mean, pred_logvar = outputs
+                    mean_np = pred_mean.cpu().numpy()  # (B,) — scaled-space mean
+                    # pred_dist_std: distribution std in *scaled* space (not phase_std!)
+                    pred_dist_std_np = torch.exp(0.5 * pred_logvar).cpu().numpy()  # (B,)
+                else:
+                    mean_np = outputs.cpu().numpy()  # (B,)
+                    pred_dist_std_np = None
 
             # ----------------------------------------------------------
             # Vectorised inverse scaling: X_latent = X_scaled * scale + center
@@ -761,6 +942,15 @@ def _build_model(config: TrainingConfig) -> nn.Module:
         return InSARGRU(**model_kwargs)
     if config.model_type == "tcn":
         return InSARTCN(**model_kwargs, kernel_size=config.tcn_kernel_size)
+    if config.model_type == "stepwise_gru":
+        return InSARStepwiseGRU(
+            input_dim=1,
+            hidden_dim=config.hidden_dim,
+            num_layers=config.num_layers,
+            dropout=config.dropout,
+            time_feat_dim=8,
+            fc_dim=128,
+        )
     return InSARLSTM(**model_kwargs)
 
 
@@ -779,7 +969,10 @@ def run_training_and_prediction(config: TrainingConfig) -> Path:
     with open(config.dataset_dir / "dates.pkl", "rb") as f:
         dates = pickle.load(f)
 
-    scaler_type = "robust"
+    # stepwise_gru forces scaler_type="none" (no per-pixel scaling computation)
+    # and stepwise dataset mode.
+    stepwise = config.model_type == "stepwise_gru"
+    scaler_type = "none" if stepwise else config.scaler_type
 
     prep_start = time.perf_counter()
     print("[RNN] preparing_dataset_scalers=start", flush=True)
@@ -790,6 +983,7 @@ def run_training_and_prediction(config: TrainingConfig) -> Path:
         use_zscore=config.use_zscore,
         metric=config.metric,
         scaler_type=scaler_type,
+        stepwise=stepwise,
     )
     print(f"[RNN] preparing_dataset_scalers=done elapsed_sec={time.perf_counter() - prep_start:.2f}", flush=True)
     train_size = int(0.8 * len(full_dataset))
@@ -815,7 +1009,7 @@ def run_training_and_prediction(config: TrainingConfig) -> Path:
         f"weight_decay={config.weight_decay} max_grad_norm={config.max_grad_norm}",
         flush=True,
     )
-    print(f"[RNN] scaler_type={scaler_type}", flush=True)
+    print(f"[RNN] scaler_type={scaler_type} stepwise={stepwise}", flush=True)
     print(f"[RNN] train_samples={len(train_dataset)} val_samples={len(val_dataset)}", flush=True)
     if config.use_zscore:
         print(
@@ -826,7 +1020,9 @@ def run_training_and_prediction(config: TrainingConfig) -> Path:
 
     base_model = _build_model(config)
     model = InSARDistributionHead(base_model) if config.use_zscore else base_model
-    if config.use_zscore:
+    if stepwise:
+        criterion = _stepwise_mse
+    elif config.use_zscore:
         criterion = _normal_nll
     elif config.loss_type == "huber":
         criterion = nn.SmoothL1Loss()
@@ -872,6 +1068,7 @@ def run_training_and_prediction(config: TrainingConfig) -> Path:
         use_zscore=config.use_zscore,
         metric=config.metric,
         scaler_type=scaler_type,
+        stepwise=stepwise,
         prefit_scaler_center=full_dataset.scaler_center,
         prefit_scaler_scale=full_dataset.scaler_scale,
     )

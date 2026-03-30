@@ -357,11 +357,19 @@ def build_and_save_dataset(config: DatasetConfig) -> Path:
 
     timeseries, dates = build_insar_timeseries_from_observations(train_observations)
 
+    geninue_data = observations[-1][2]
+
     if config.histogram_match and timeseries.shape[2] > 1:
         from .histogram_matching import histogram_match_timeseries
-        timeseries = histogram_match_timeseries(timeseries, strategy=config.histogram_match_strategy)
 
-    geninue_data = observations[-1][2]
+        # Per Liu et al. 2024, the post-event observation must participate in
+        # histogram matching together with the pre-event timeseries so that all
+        # time steps share the same reference distribution before scoring.
+        obs_2d = geninue_data if geninue_data.ndim == 2 else geninue_data[:, :, 0]
+        combined = np.concatenate([timeseries, obs_2d[:, :, np.newaxis]], axis=2)
+        matched_combined = histogram_match_timeseries(combined, strategy=config.histogram_match_strategy)
+        timeseries = matched_combined[:, :, :-1]
+        geninue_data = matched_combined[:, :, -1]
 
     output_subfolder = config.output_dir / (config.dataset_name or _default_dataset_name(config.observation_file))
     save_dataset(
