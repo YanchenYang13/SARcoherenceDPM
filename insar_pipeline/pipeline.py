@@ -37,6 +37,7 @@ def run_full_pipeline(
     optimizer: str = "adam",
     weight_decay: float = 0.0,
     max_grad_norm: float | None = None,
+    scaler_type: str = "robust",
 ) -> dict[str, Path]:
     cropped_dir = base_dir / "cropped"
 
@@ -66,6 +67,7 @@ def run_full_pipeline(
             optimizer=optimizer,
             weight_decay=weight_decay,
             max_grad_norm=max_grad_norm,
+            scaler_type=scaler_type,
             artifact_prefix=_rnn_prefix(metric, model_type, use_zscore, use_timestamp),
         )
     )
