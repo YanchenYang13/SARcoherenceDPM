@@ -472,13 +472,18 @@ class InSARStepwiseGRU(nn.Module):
     In training mode (generate_mode=False) the shifted hidden states
     [h_0, h_1, ..., h_{T-1}] are decoded to predict [x_1, ..., x_T].
     In generate mode (generate_mode=True) [h_0, ..., h_T] are decoded to
-    additionally predict x_{T+1} — the co-event step.
+    additionally predict x_{T+1} — the co-event step.  When time features
+    are active, ``target_time_features`` are gated into h_T so that the
+    co-event decoder is aware of the temporal baseline of the prediction
+    target (matching the approach used by :class:`InSARGRU`).
 
     Args:
         input_dim: Raw input channels (1 for coherence / phase_std).
         hidden_dim: GRU hidden state and input-embedding width.
         num_layers: Number of stacked GRU layers.
-        dropout: Dropout probability (only applied when num_layers > 1).
+        dropout: Dropout probability.  Applied in the FC decoder to
+            regularise time-feature fusion; the GRU internal dropout is
+            only active when ``num_layers > 1``.
         time_feat_dim: Dimensionality of the time-feature vector.
         fc_dim: Width of each layer in the 3-layer FC decoder.
     """
@@ -500,6 +505,7 @@ class InSARStepwiseGRU(nn.Module):
             nn.Linear(hidden_dim * 2, hidden_dim),
             nn.Sigmoid(),
         )
+        self.layer_norm = nn.LayerNorm(hidden_dim)
         self.gru = nn.GRU(
             input_size=hidden_dim,
             hidden_size=hidden_dim,
@@ -507,12 +513,20 @@ class InSARStepwiseGRU(nn.Module):
             batch_first=True,
             dropout=dropout if num_layers > 1 else 0,
         )
+        # Target-step time projection for generate_mode co-event prediction.
+        self.target_time_proj = nn.Linear(time_feat_dim, hidden_dim)
+        self.target_time_gate = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.Sigmoid(),
+        )
         # 3-layer FC decoder: hidden_dim → fc_dim → fc_dim → fc_dim → input_dim
         self.dec_fc = nn.Sequential(
             nn.Linear(hidden_dim, fc_dim),
             nn.ReLU(),
+            nn.Dropout(dropout),
             nn.Linear(fc_dim, fc_dim),
             nn.ReLU(),
+            nn.Dropout(dropout),
             nn.Linear(fc_dim, fc_dim),
             nn.ReLU(),
         )
@@ -531,8 +545,9 @@ class InSARStepwiseGRU(nn.Module):
             src: (B, T) raw input values.
             time_features: (B, T, time_feat_dim) per-step time features.
             target_time_features: (B, time_feat_dim) time features for step
-                T+1 (accepted for interface compatibility; time features for
-                all T steps are fused at the GRU input stage).
+                T+1.  When time features are active and ``generate_mode=True``,
+                these are gated into h_T so the decoder is aware of the
+                co-event temporal baseline.
             generate_mode: If True, also predict step T+1 using h_T.
 
         Returns:
@@ -548,9 +563,9 @@ class InSARStepwiseGRU(nn.Module):
             time_embed = self.time_embedding(time_features)  # (B, T, hidden_dim)
             gate_input = torch.cat([src_embed, time_embed], dim=-1)
             gate = self.fusion_gate(gate_input)
-            combined_input = src_embed + gate * time_embed
+            combined_input = self.layer_norm(src_embed + gate * time_embed)
         else:
-            combined_input = src_embed
+            combined_input = self.layer_norm(src_embed)
 
         output, _ = self.gru(combined_input)  # output: (B, T, hidden_dim)
 
@@ -559,6 +574,14 @@ class InSARStepwiseGRU(nn.Module):
         if generate_mode:
             # [h_0, h_1, ..., h_T]: (B, T+1, hidden_dim) — includes h_T for x_{T+1}
             shifted = torch.cat([h_0, output], dim=1)
+            # Inject target time features into h_T (last position) for
+            # co-event prediction so the decoder knows the temporal baseline.
+            if time_active:
+                target_proj = self.target_time_proj(target_time_features)  # (B, hidden_dim)
+                h_last = shifted[:, -1, :]  # (B, hidden_dim)
+                tgate = self.target_time_gate(torch.cat([h_last, target_proj], dim=-1))
+                shifted = shifted.clone()
+                shifted[:, -1, :] = h_last + tgate * target_proj
         else:
             # [h_0, h_1, ..., h_{T-1}]: (B, T, hidden_dim)
             shifted = torch.cat([h_0, output[:, :-1, :]], dim=1)
