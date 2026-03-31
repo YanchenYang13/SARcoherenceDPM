@@ -26,7 +26,7 @@ def run_full_pipeline(
     geom_reference_dir: Path,
     next_date: str = "20160821_20160902",
     metric: str = "phase_std",
-    model_type: str = "lstm",
+    model_type: str = "stepwise_gru",
     use_timestamp: bool = True,
     use_zscore: bool = False,
     sequence_length: int | None = None,

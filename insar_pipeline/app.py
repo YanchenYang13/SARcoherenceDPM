@@ -242,7 +242,6 @@ def run_step(args: argparse.Namespace) -> None:
         _kv("optimizer", args.optimizer)
         _kv("weight_decay", args.weight_decay)
         _kv("max_grad_norm", args.max_grad_norm)
-        _kv("tcn_kernel_size", args.tcn_kernel_size)
         _kv("scaler_type", args.scaler_type)
         predict_dir = run_training_and_prediction(
             TrainingConfig(
@@ -264,8 +263,6 @@ def run_step(args: argparse.Namespace) -> None:
                 weight_decay=args.weight_decay,
                 max_grad_norm=args.max_grad_norm,
                 artifact_prefix=prefix,
-                loss_type=args.loss_type,
-                tcn_kernel_size=args.tcn_kernel_size,
                 scaler_type=args.scaler_type,
             )
         )
@@ -625,15 +622,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pred-batch-size", type=int, default=256)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--timeseries-metric", choices=["phase_std", "coherence"], default="phase_std")
-    parser.add_argument("--ts-model", choices=["lstm", "gru", "tcn", "stepwise_gru"], default="lstm")
+    parser.add_argument("--ts-model", choices=["stepwise_gru"], default="stepwise_gru")
     parser.add_argument("--rnn-hidden-dim", type=int, default=64)
     parser.add_argument("--rnn-num-layers", type=int, default=2)
     parser.add_argument("--rnn-dropout", type=float, default=0.1)
     parser.add_argument("--scaler-type", choices=["robust", "minmax", "none"], default="robust", help="Per-pixel scaler type: 'robust' (median/IQR), 'minmax' ([-1,1]), or 'none' (identity, skips scaler fit).")
     parser.add_argument("--disable-timestamp", action="store_true", help="Disable dates.pkl time feature inputs.")
     parser.add_argument("--use-zscore", action="store_true", help="Enable logit+distribution prediction and zscore scoring.")
-    parser.add_argument("--loss-type", choices=["mse", "huber"], default="mse", help="Loss function for RNN training (mse or huber).")
-    parser.add_argument("--tcn-kernel-size", type=int, default=3, help="Kernel size for TCN causal convolutions (default: 3). Larger values increase per-layer receptive field.")
 
     parser.add_argument("--vit-matrix-mode", choices=["similarity", "outer", "difference"], default="similarity")
     parser.add_argument("--vit-patch-size", type=int, default=2)
