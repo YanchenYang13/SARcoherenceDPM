@@ -10,7 +10,6 @@ from typing import Literal
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 
@@ -192,275 +191,12 @@ class InSARDataset(Dataset):
         }
 
 
-class InSARLSTM(nn.Module):
-    """LSTM with additive residual gated time-feature fusion and true notime bypass.
-
-    Time fusion uses additive residual (src_embed + gate * time_embed) rather than
-    weighted interpolation.  This preserves the source signal while allowing
-    the learned gate to control how much temporal context is injected.
-    """
-
-    def __init__(self, input_dim=1, hidden_dim=64, num_layers=2, dropout=0.1, time_feat_dim=4):
-        super().__init__()
-        self.hidden_dim = hidden_dim
-        self.input_embedding = nn.Linear(input_dim, hidden_dim)
-        self.time_embedding = nn.Linear(time_feat_dim, hidden_dim)
-
-        # Gated fusion learns HOW MUCH time info to inject
-        self.fusion_gate = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim),
-            nn.Sigmoid(),
-        )
-        self.layer_norm = nn.LayerNorm(hidden_dim)
-
-        self.lstm = nn.LSTM(
-            input_size=hidden_dim,
-            hidden_size=hidden_dim,
-            num_layers=num_layers,
-            batch_first=True,
-            dropout=dropout if num_layers > 1 else 0,
-        )
-        self.target_time_proj = nn.Linear(time_feat_dim, hidden_dim)
-        self.output_layer = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, 1),
-        )
-
-    def forward(self, src, time_features, target_time_features):
-        src = src.unsqueeze(-1)
-        src_embed = self.input_embedding(src)
-
-        # True bypass: when time features are all zero, skip fusion entirely
-        time_active = time_features.abs().sum() > 0
-
-        if time_active:
-            time_embed = self.time_embedding(time_features)
-            gate_input = torch.cat([src_embed, time_embed], dim=-1)
-            gate = self.fusion_gate(gate_input)
-            combined_input = src_embed + gate * time_embed
-            combined_input = self.layer_norm(combined_input)
-        else:
-            combined_input = self.layer_norm(src_embed)
-
-        _, (h_n, _) = self.lstm(combined_input)
-        seq_repr = h_n[-1]
-
-        if time_active:
-            target_time_embed = self.target_time_proj(target_time_features)
-            combined = torch.cat([seq_repr, target_time_embed], dim=-1)
-        else:
-            combined = torch.cat([seq_repr, torch.zeros_like(seq_repr)], dim=-1)
-
-        return self.output_layer(combined).squeeze(-1)
-
-
-class InSARGRU(nn.Module):
-    """GRU variant with additive residual gated time-feature fusion.
-
-    Time fusion uses additive residual (src_embed + gate * time_embed) rather than
-    weighted interpolation.  This preserves the source signal while allowing
-    the learned gate to control how much temporal context is injected.
-    """
-
-    def __init__(self, input_dim=1, hidden_dim=64, num_layers=2, dropout=0.1, time_feat_dim=4):
-        super().__init__()
-        self.hidden_dim = hidden_dim
-        self.input_embedding = nn.Linear(input_dim, hidden_dim)
-        self.time_embedding = nn.Linear(time_feat_dim, hidden_dim)
-
-        self.fusion_gate = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim),
-            nn.Sigmoid(),
-        )
-        self.layer_norm = nn.LayerNorm(hidden_dim)
-
-        self.gru = nn.GRU(
-            input_size=hidden_dim,
-            hidden_size=hidden_dim,
-            num_layers=num_layers,
-            batch_first=True,
-            dropout=dropout if num_layers > 1 else 0,
-        )
-        self.target_time_proj = nn.Linear(time_feat_dim, hidden_dim)
-        self.output_layer = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, 1),
-        )
-
-    def forward(self, src, time_features, target_time_features):
-        src = src.unsqueeze(-1)
-        src_embed = self.input_embedding(src)
-
-        time_active = time_features.abs().sum() > 0
-
-        if time_active:
-            time_embed = self.time_embedding(time_features)
-            gate_input = torch.cat([src_embed, time_embed], dim=-1)
-            gate = self.fusion_gate(gate_input)
-            combined_input = src_embed + gate * time_embed
-            combined_input = self.layer_norm(combined_input)
-        else:
-            combined_input = self.layer_norm(src_embed)
-
-        _, h_n = self.gru(combined_input)
-        seq_repr = h_n[-1]
-
-        if time_active:
-            target_time_embed = self.target_time_proj(target_time_features)
-            combined = torch.cat([seq_repr, target_time_embed], dim=-1)
-        else:
-            combined = torch.cat([seq_repr, torch.zeros_like(seq_repr)], dim=-1)
-
-        return self.output_layer(combined).squeeze(-1)
-
-
-class InSARDistributionHead(nn.Module):
-    def __init__(self, base_model: nn.Module):
-        super().__init__()
-        self.base_model = base_model
-        self.mu_head = nn.Linear(1, 1)
-        self.logvar_head = nn.Linear(1, 1)
-
-    def forward(self, src, time_features, target_time_features):
-        base_out = self.base_model(src, time_features, target_time_features).unsqueeze(-1)
-        mu = self.mu_head(base_out).squeeze(-1)
-        logvar = self.logvar_head(base_out).squeeze(-1).clamp(min=-10.0, max=5.0)
-        return mu, logvar
-
-
-class CausalConv1d(nn.Module):
-    """1D convolution with causal (left-only) padding to prevent future leakage."""
-
-    def __init__(self, in_channels: int, out_channels: int, kernel_size: int, dilation: int = 1):
-        super().__init__()
-        self._pad = (kernel_size - 1) * dilation
-        self.conv = nn.Conv1d(in_channels, out_channels, kernel_size, dilation=dilation, padding=0)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, C, T)
-        x = F.pad(x, (self._pad, 0))
-        return self.conv(x)
-
-
-class TCNBlock(nn.Module):
-    """Residual TCN block: two CausalConv1d layers + LayerNorm + GELU + dropout."""
-
-    def __init__(self, channels: int, kernel_size: int, dilation: int, dropout: float = 0.1):
-        super().__init__()
-        self.conv1 = CausalConv1d(channels, channels, kernel_size, dilation)
-        self.norm1 = nn.LayerNorm(channels)
-        self.conv2 = CausalConv1d(channels, channels, kernel_size, dilation)
-        self.norm2 = nn.LayerNorm(channels)
-        self.drop = nn.Dropout(dropout)
-        self.act = nn.GELU()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, T, C)  ← channel-last convention for LayerNorm
-        residual = x
-        # Conv1d expects (B, C, T)
-        out = self.conv1(x.permute(0, 2, 1)).permute(0, 2, 1)
-        out = self.act(self.norm1(out))
-        out = self.drop(out)
-        out = self.conv2(out.permute(0, 2, 1)).permute(0, 2, 1)
-        out = self.norm2(out)
-        out = self.drop(out)
-        return self.act(out + residual)
-
-
-class InSARTCN(nn.Module):
-    """Temporal Convolutional Network for InSAR time series.
-
-    Preferred over LSTM/GRU for short sequences (~10 steps) because causal
-    dilated convolutions cover the full receptive field in a single forward
-    pass without sequential hidden-state propagation.
-
-    Receptive field for num_layers=3, kernel_size=3 (exponential dilation [1,2,4]):
-        Each TCNBlock contributes 2*(kernel_size-1)*dilation to the RF.
-        Total RF = 1 + 2*(3-1)*(1+2+4) = 29  >>  10  (covers full sequence)
-
-    Uses additive residual gated fusion for time features:
-        combined = src_embed + gate * time_embed
-    This prevents signal dilution: the source embedding is preserved and time
-    information is added proportionally to the learned gate values.
-
-    Interface is identical to InSARLSTM / InSARGRU.
-    """
-
-    def __init__(
-        self,
-        input_dim: int = 1,
-        hidden_dim: int = 64,
-        num_layers: int = 3,
-        dropout: float = 0.1,
-        time_feat_dim: int = 4,
-        kernel_size: int = 3,
-    ):
-        super().__init__()
-        self.hidden_dim = hidden_dim
-
-        self.input_embedding = nn.Linear(input_dim, hidden_dim)
-        self.time_embedding = nn.Linear(time_feat_dim, hidden_dim)
-
-        self.fusion_gate = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim),
-            nn.Sigmoid(),
-        )
-        self.layer_norm = nn.LayerNorm(hidden_dim)
-
-        # Exponential dilation: [1, 2, 4, ...]
-        self.tcn_blocks = nn.ModuleList([
-            TCNBlock(hidden_dim, kernel_size, dilation=2 ** i, dropout=dropout)
-            for i in range(num_layers)
-        ])
-
-        self.target_time_proj = nn.Linear(time_feat_dim, hidden_dim)
-        self.output_layer = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, 1),
-        )
-
-    def forward(self, src: torch.Tensor, time_features: torch.Tensor, target_time_features: torch.Tensor) -> torch.Tensor:
-        # src: (B, T)
-        src_embed = self.input_embedding(src.unsqueeze(-1))  # (B, T, hidden_dim)
-
-        time_active = time_features.abs().sum() > 0
-
-        if time_active:
-            time_embed = self.time_embedding(time_features)  # (B, T, hidden_dim)
-            gate_input = torch.cat([src_embed, time_embed], dim=-1)
-            gate = self.fusion_gate(gate_input)             # (B, T, hidden_dim)
-            combined_input = src_embed + gate * time_embed  # additive residual
-            combined_input = self.layer_norm(combined_input)
-        else:
-            combined_input = self.layer_norm(src_embed)
-
-        out = combined_input
-        for block in self.tcn_blocks:
-            out = block(out)
-
-        seq_repr = out[:, -1, :]  # (B, hidden_dim) — last time step
-
-        if time_active:
-            target_time_embed = self.target_time_proj(target_time_features)  # (B, hidden_dim)
-            combined = torch.cat([seq_repr, target_time_embed], dim=-1)
-        else:
-            combined = torch.cat([seq_repr, torch.zeros_like(seq_repr)], dim=-1)
-
-        return self.output_layer(combined).squeeze(-1)
-
-
 class InSARStepwiseGRU(nn.Module):
     """GRU with stepwise prediction, inspired by dpm-rnn-public.
 
     Predicts x_t from h_{t-1} at every time step, providing T supervision
     signals per pixel instead of 1.  Uses gated additive residual time-feature
-    fusion (the same pattern as InSARGRU) applied before the GRU input.
+    fusion (the same pattern as the previous InSARGRU) applied before the GRU input.
 
     In training mode (generate_mode=False) the shifted hidden states
     [h_0, h_1, ..., h_{T-1}] are decoded to predict [x_1, ..., x_T].
@@ -468,7 +204,7 @@ class InSARStepwiseGRU(nn.Module):
     additionally predict x_{T+1} — the co-event step.  When time features
     are active, ``target_time_features`` are gated into h_T so that the
     co-event decoder is aware of the temporal baseline of the prediction
-    target (matching the approach used by :class:`InSARGRU`).
+    target.
 
     Args:
         input_dim: Raw input channels (1 for coherence / phase_std).
@@ -524,6 +260,7 @@ class InSARStepwiseGRU(nn.Module):
             nn.ReLU(),
         )
         self.dec_mean = nn.Linear(fc_dim, input_dim)
+        self.dec_logvar = nn.Linear(fc_dim, input_dim)
         # Decoder-side time injection: projects time features to decoder width
         # and gates them into the FC output so each decoding step is aware of
         # the temporal baseline of that specific prediction step.
@@ -539,7 +276,8 @@ class InSARStepwiseGRU(nn.Module):
         time_features: torch.Tensor,
         target_time_features: torch.Tensor,
         generate_mode: bool = False,
-    ) -> torch.Tensor:
+        distribution_mode: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Stepwise forward pass.
 
         Args:
@@ -550,11 +288,15 @@ class InSARStepwiseGRU(nn.Module):
                 these are gated into h_T so the decoder is aware of the
                 co-event temporal baseline.
             generate_mode: If True, also predict step T+1 using h_T.
+            distribution_mode: If True, return ``(dec_mean, dec_logvar)`` tuple
+                both shaped (B, T, 1) or (B, T+1, 1).  Used for Gaussian NLL
+                training and probabilistic inference.
 
         Returns:
-            pred: (B, T, 1) for generate_mode=False, or (B, T+1, 1) for
-                generate_mode=True where the last slice is the co-event
-                prediction.
+            When ``distribution_mode=False`` (default): pred (B, T, 1) or
+                (B, T+1, 1) for generate_mode=True.
+            When ``distribution_mode=True``: tuple ``(mean, logvar)`` both of
+                the same shape as the point-prediction case above.
         """
         B, T = src.shape
         src_embed = self.input_embedding(src.unsqueeze(-1))  # (B, T, hidden_dim)
@@ -611,6 +353,9 @@ class InSARStepwiseGRU(nn.Module):
             fc_out = fc_out + dec_gate * dec_time  # gated additive residual
 
         pred = self.dec_mean(fc_out)       # (B, T or T+1, 1)
+        if distribution_mode:
+            logvar = self.dec_logvar(fc_out).clamp(min=-10.0, max=5.0)
+            return pred, logvar
         return pred
 
 
@@ -624,7 +369,7 @@ class TrainingConfig:
     pred_batch_size: int = 256
     lr: float = 1e-3
     metric: Literal["phase_std", "coherence"] = "phase_std"
-    model_type: Literal["lstm", "gru", "tcn", "stepwise_gru"] = "lstm"
+    model_type: Literal["stepwise_gru"] = "stepwise_gru"
     use_timestamp: bool = True
     use_zscore: bool = False
     hidden_dim: int = 64
@@ -634,8 +379,6 @@ class TrainingConfig:
     weight_decay: float = 0.0
     max_grad_norm: float | None = None
     artifact_prefix: str = ""
-    loss_type: Literal["mse", "huber"] = "mse"
-    tcn_kernel_size: int = 3
     scaler_type: str = "robust"  # "robust" | "minmax" | "none"
 
 
@@ -700,14 +443,26 @@ def _zscore_space_to_metric_std(std_in_zspace: float, z_value: float, metric: st
     return float(abs(dstd_dz) * std_in_zspace)
 
 
-def _normal_nll(mu: torch.Tensor, logvar: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    # Gaussian negative log-likelihood (constant −0.5·log(2π) omitted).
-    # NLL = 0.5 * (logvar + (target − μ)² / σ²)
-    # This value can be negative when the model learns a tight predictive
-    # distribution (small logvar) and fits the data well — that is expected
-    # and correct behaviour, not a sign of numerical error.
-    var = torch.exp(logvar).clamp(min=1e-6)
-    return (0.5 * (logvar + ((target - mu) ** 2) / var)).mean()
+def _stepwise_nll(
+    pred_mean: torch.Tensor,
+    pred_logvar: torch.Tensor,
+    target: torch.Tensor,
+) -> torch.Tensor:
+    """Stepwise Gaussian NLL averaged over all T time steps and batch samples.
+
+    Matches the dpm-rnn-public approach: nll = 0.5 * (logvar + (target - mean)^2 / exp(logvar)).
+    This value can be negative when the model learns a tight predictive
+    distribution (small logvar) and fits the data well — that is expected
+    and correct behaviour, not a sign of numerical error.
+
+    Args:
+        pred_mean:   (B, T, 1) model mean predictions.
+        pred_logvar: (B, T, 1) model log-variance predictions.
+        target:      (B, T, 1) ground-truth values.
+    """
+    var = torch.exp(pred_logvar).clamp(min=1e-6)
+    nll = 0.5 * (pred_logvar + ((target - pred_mean) ** 2) / var)
+    return nll.mean()
 
 
 def _stepwise_mse(
@@ -756,6 +511,7 @@ def train_model(
     num_epochs=50,
     device="cpu",
     max_grad_norm: float | None = None,
+    use_zscore: bool = False,
 ):
     if isinstance(device, str):
         device = torch.device(device)
@@ -784,9 +540,12 @@ def train_model(
                 time_features = batch["time_features"].to(device, non_blocking=non_blocking)
                 target_time_features = batch["target_time_features"].to(device, non_blocking=non_blocking)
                 optimizer.zero_grad()
-                outputs = model(seq, time_features, target_time_features, generate_mode=False)
+                outputs = model(seq, time_features, target_time_features, generate_mode=False, distribution_mode=use_zscore)
                 target = seq.unsqueeze(-1)  # (B, T, 1)
-                loss = criterion(outputs, target)
+                if isinstance(outputs, tuple):
+                    loss = criterion(outputs[0], outputs[1], target)
+                else:
+                    loss = criterion(outputs, target)
                 if not first_batch_logged:
                     first_batch_logged = True
                     print(
@@ -829,9 +588,12 @@ def train_model(
                     seq = batch["sequence"].to(device, non_blocking=non_blocking)
                     time_features = batch["time_features"].to(device, non_blocking=non_blocking)
                     target_time_features = batch["target_time_features"].to(device, non_blocking=non_blocking)
-                    outputs = model(seq, time_features, target_time_features, generate_mode=False)
+                    outputs = model(seq, time_features, target_time_features, generate_mode=False, distribution_mode=use_zscore)
                     target = seq.unsqueeze(-1)
-                    loss = criterion(outputs, target)
+                    if isinstance(outputs, tuple):
+                        loss = criterion(outputs[0], outputs[1], target)
+                    else:
+                        loss = criterion(outputs, target)
                     val_loss += loss.item() * seq.size(0)
                 else:
                     x = batch["x"].to(device, non_blocking=non_blocking)
@@ -933,10 +695,16 @@ def predict_future(
                 seq = batch["sequence"].to(device)
                 time_features = batch["time_features"].to(device)
                 target_time_features = batch["target_time_features"].to(device)
-                outputs = model(seq, time_features, target_time_features, generate_mode=True)
-                # outputs: (B, T+1, 1) — last slice is the co-event prediction
-                mean_np = outputs[:, -1, 0].cpu().numpy()  # (B,)
-                pred_dist_std_np = None
+                outputs = model(seq, time_features, target_time_features, generate_mode=True, distribution_mode=use_zscore)
+                if isinstance(outputs, tuple):
+                    # distribution_mode=True: outputs is (mu, logvar), both (B, T+1, 1)
+                    mu, logvar = outputs
+                    mean_np = mu[:, -1, 0].cpu().numpy()  # (B,)
+                    pred_dist_std_np = torch.exp(0.5 * logvar[:, -1, 0]).cpu().numpy()  # (B,)
+                else:
+                    # outputs: (B, T+1, 1) — last slice is the co-event prediction
+                    mean_np = outputs[:, -1, 0].cpu().numpy()  # (B,)
+                    pred_dist_std_np = None
             else:
                 x = batch["x"].to(device)
                 time_features = batch["time_features"].to(device)
@@ -993,21 +761,14 @@ def predict_future(
 
 
 def _build_model(config: TrainingConfig) -> nn.Module:
-    model_kwargs = dict(hidden_dim=config.hidden_dim, num_layers=config.num_layers, dropout=config.dropout)
-    if config.model_type == "gru":
-        return InSARGRU(**model_kwargs)
-    if config.model_type == "tcn":
-        return InSARTCN(**model_kwargs, kernel_size=config.tcn_kernel_size)
-    if config.model_type == "stepwise_gru":
-        return InSARStepwiseGRU(
-            input_dim=1,
-            hidden_dim=config.hidden_dim,
-            num_layers=config.num_layers,
-            dropout=config.dropout,
-            time_feat_dim=4,
-            fc_dim=128,
-        )
-    return InSARLSTM(**model_kwargs)
+    return InSARStepwiseGRU(
+        input_dim=1,
+        hidden_dim=config.hidden_dim,
+        num_layers=config.num_layers,
+        dropout=config.dropout,
+        time_feat_dim=4,
+        fc_dim=128,
+    )
 
 
 def _resolve_timeseries_filename(dataset_dir: Path, metric: str) -> str:
@@ -1075,15 +836,11 @@ def run_training_and_prediction(config: TrainingConfig) -> Path:
         )
 
     base_model = _build_model(config)
-    model = InSARDistributionHead(base_model) if config.use_zscore else base_model
-    if stepwise:
-        criterion = _stepwise_mse
-    elif config.use_zscore:
-        criterion = _normal_nll
-    elif config.loss_type == "huber":
-        criterion = nn.SmoothL1Loss()
+    model = base_model
+    if stepwise and config.use_zscore:
+        criterion = _stepwise_nll
     else:
-        criterion = nn.MSELoss()
+        criterion = _stepwise_mse
     if config.optimizer == "adamw":
         optimizer = optim.AdamW(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
     else:
@@ -1109,6 +866,7 @@ def run_training_and_prediction(config: TrainingConfig) -> Path:
         num_epochs=config.epochs,
         device=device,
         max_grad_norm=config.max_grad_norm,
+        use_zscore=config.use_zscore,
     )
     model.load_state_dict(torch.load(checkpoint_path, map_location=device))
 
