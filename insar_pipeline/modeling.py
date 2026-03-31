@@ -38,20 +38,18 @@ class InSARDataset(Dataset):
         self.stepwise = stepwise
 
         # -----------------------------------------------------------------
-        # IMPROVED time-feature encoding (dim=8)
-        #   [doy_sin, doy_cos, month_sin, month_cos, day_sin, day_cos,
-        #    norm_interval, seq_pos]
+        # Time-feature encoding (dim=4)
+        #   [doy_sin, doy_cos, norm_interval, delta_interval]
         #
         # Features:
         # 1) doy_sin/cos (period=365.25): captures seasonal decorrelation
-        #    (vegetation, snow cover, soil moisture).
-        # 2) month_sin/cos, day_sin/cos: fine-grained calendar position.
-        # 3) norm_interval: temporal baseline normalised to [0,1]; distinguishes
-        #    6-day from 12-day acquisitions.
-        # 4) seq_pos: normalised sequence position in [0,1] (0=oldest pair in
-        #    the dataset, 1=most recent / prediction target).  This gives the
-        #    LSTM an explicit recency cue so it can weight recent pre-event
-        #    coherence more heavily when anticipating the post-event scene.
+        #    (vegetation, snow cover, soil moisture).  One cycle is sufficient;
+        #    redundant month/day cycles are dropped to reduce collinearity.
+        # 2) norm_interval: temporal baseline normalised to [0,1]; the most
+        #    discriminative feature for SAR — directly controls decorrelation.
+        # 3) delta_interval: difference between current and previous step's
+        #    interval, normalised by max_interval.  Encodes sampling
+        #    irregularity; zero for the first step.
         # -----------------------------------------------------------------
         intervals = []
         self.time_features = []
@@ -63,13 +61,9 @@ class InSARDataset(Dataset):
             doy = start.timetuple().tm_yday
             doy_sin = np.sin(2 * np.pi * doy / 365.25)
             doy_cos = np.cos(2 * np.pi * doy / 365.25)
-            month_sin = np.sin(2 * np.pi * start.month / 12)
-            month_cos = np.cos(2 * np.pi * start.month / 12)
-            day_sin = np.sin(2 * np.pi * start.day / 31)
-            day_cos = np.cos(2 * np.pi * start.day / 31)
             interval = (end - start).days
             intervals.append(interval)
-            self.time_features.append([doy_sin, doy_cos, month_sin, month_cos, day_sin, day_cos, interval])
+            self.time_features.append([doy_sin, doy_cos, interval])
 
         self.time_features = np.array(self.time_features, dtype=np.float32)
 
@@ -77,15 +71,14 @@ class InSARDataset(Dataset):
         max_interval = max(intervals) if intervals else 1.0
         if max_interval == 0:
             max_interval = 1.0
-        self.time_features[:, 6] /= max_interval
+        self.time_features[:, 2] /= max_interval
 
-        # Append normalised sequence position [0, 1] as 8th feature.
-        # The position reflects temporal order: 0 = oldest pair in the
-        # current dataset window, 1 = most recent entry (or the prediction
-        # target date when is_prediction=True).
-        n_dates = len(self.time_features)
-        seq_pos = np.arange(n_dates, dtype=np.float32) / max(n_dates - 1, 1)
-        self.time_features = np.column_stack([self.time_features, seq_pos])
+        # Append delta_interval: normalised difference between consecutive intervals.
+        # Encodes sampling irregularity; zero for the first step.
+        delta_intervals = np.zeros(len(intervals), dtype=np.float32)
+        for k in range(1, len(intervals)):
+            delta_intervals[k] = (intervals[k] - intervals[k - 1]) / max_interval
+        self.time_features = np.column_stack([self.time_features, delta_intervals])
 
         # ------------------------------------------------------------------
         # Vectorised per-pixel scaling (replaces the former per-pixel loop
@@ -207,7 +200,7 @@ class InSARLSTM(nn.Module):
     the learned gate to control how much temporal context is injected.
     """
 
-    def __init__(self, input_dim=1, hidden_dim=64, num_layers=2, dropout=0.1, time_feat_dim=8):
+    def __init__(self, input_dim=1, hidden_dim=64, num_layers=2, dropout=0.1, time_feat_dim=4):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.input_embedding = nn.Linear(input_dim, hidden_dim)
@@ -271,7 +264,7 @@ class InSARGRU(nn.Module):
     the learned gate to control how much temporal context is injected.
     """
 
-    def __init__(self, input_dim=1, hidden_dim=64, num_layers=2, dropout=0.1, time_feat_dim=8):
+    def __init__(self, input_dim=1, hidden_dim=64, num_layers=2, dropout=0.1, time_feat_dim=4):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.input_embedding = nn.Linear(input_dim, hidden_dim)
@@ -403,7 +396,7 @@ class InSARTCN(nn.Module):
         hidden_dim: int = 64,
         num_layers: int = 3,
         dropout: float = 0.1,
-        time_feat_dim: int = 8,
+        time_feat_dim: int = 4,
         kernel_size: int = 3,
     ):
         super().__init__()
@@ -494,7 +487,7 @@ class InSARStepwiseGRU(nn.Module):
         hidden_dim: int = 256,
         num_layers: int = 1,
         dropout: float = 0.1,
-        time_feat_dim: int = 8,
+        time_feat_dim: int = 4,
         fc_dim: int = 128,
     ):
         super().__init__()
@@ -531,6 +524,14 @@ class InSARStepwiseGRU(nn.Module):
             nn.ReLU(),
         )
         self.dec_mean = nn.Linear(fc_dim, input_dim)
+        # Decoder-side time injection: projects time features to decoder width
+        # and gates them into the FC output so each decoding step is aware of
+        # the temporal baseline of that specific prediction step.
+        self.dec_time_proj = nn.Linear(time_feat_dim, fc_dim)
+        self.dec_time_gate = nn.Sequential(
+            nn.Linear(fc_dim * 2, fc_dim),
+            nn.Sigmoid(),
+        )
 
     def forward(
         self,
@@ -582,11 +583,33 @@ class InSARStepwiseGRU(nn.Module):
                 tgate = self.target_time_gate(torch.cat([h_last, target_proj], dim=-1))
                 shifted = shifted.clone()
                 shifted[:, -1, :] = h_last + tgate * target_proj
+                # Build full time sequence for decoder: (B, T+1, time_feat_dim)
+                all_time = torch.cat([time_features, target_time_features.unsqueeze(1)], dim=1)
+            else:
+                all_time = None
         else:
             # [h_0, h_1, ..., h_{T-1}]: (B, T, hidden_dim)
             shifted = torch.cat([h_0, output[:, :-1, :]], dim=1)
+            # Change C: inject target_time_features into the last shifted state
+            # so that target_time_proj and target_time_gate receive gradients
+            # during training (they are only used at inference otherwise).
+            if time_active:
+                shifted = shifted.clone()
+                target_proj = self.target_time_proj(target_time_features)  # (B, hidden_dim)
+                h_last_train = shifted[:, -1, :]  # (B, hidden_dim)
+                tgate = self.target_time_gate(torch.cat([h_last_train, target_proj], dim=-1))
+                shifted[:, -1, :] = h_last_train + tgate * target_proj
+            all_time = time_features if time_active else None
 
         fc_out = self.dec_fc(shifted)      # (B, T or T+1, fc_dim)
+
+        # Change A: decoder-side time injection — let each decoding step
+        # know the temporal baseline of the step it is predicting.
+        if time_active and all_time is not None:
+            dec_time = self.dec_time_proj(all_time)  # (B, T or T+1, fc_dim)
+            dec_gate = self.dec_time_gate(torch.cat([fc_out, dec_time], dim=-1))
+            fc_out = fc_out + dec_gate * dec_time  # gated additive residual
+
         pred = self.dec_mean(fc_out)       # (B, T or T+1, 1)
         return pred
 
@@ -687,14 +710,24 @@ def _normal_nll(mu: torch.Tensor, logvar: torch.Tensor, target: torch.Tensor) ->
     return (0.5 * (logvar + ((target - mu) ** 2) / var)).mean()
 
 
-def _stepwise_mse(pred_all_steps: torch.Tensor, target_all_steps: torch.Tensor) -> torch.Tensor:
+def _stepwise_mse(
+    pred_all_steps: torch.Tensor,
+    target_all_steps: torch.Tensor,
+    last_step_weight: float = 0.1,
+) -> torch.Tensor:
     """Stepwise MSE averaged over all T time steps and batch samples.
+
+    Adds a weighted emphasis on the last step prediction to encourage the
+    model to focus on the co-event / prediction-target step accuracy.
 
     Args:
         pred_all_steps: (B, T, 1) model predictions for steps 1..T.
         target_all_steps: (B, T, 1) ground-truth values for steps 1..T.
+        last_step_weight: Extra weight for the last-step loss term.
     """
-    return ((pred_all_steps - target_all_steps) ** 2).mean()
+    base_loss = ((pred_all_steps - target_all_steps) ** 2).mean()
+    last_step_loss = ((pred_all_steps[:, -1:, :] - target_all_steps[:, -1:, :]) ** 2).mean()
+    return base_loss + last_step_weight * last_step_loss
 
 
 def _zscore_space_to_metric_std_vec(
@@ -971,7 +1004,7 @@ def _build_model(config: TrainingConfig) -> nn.Module:
             hidden_dim=config.hidden_dim,
             num_layers=config.num_layers,
             dropout=config.dropout,
-            time_feat_dim=8,
+            time_feat_dim=4,
             fc_dim=128,
         )
     return InSARLSTM(**model_kwargs)
