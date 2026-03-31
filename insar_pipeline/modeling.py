@@ -196,7 +196,7 @@ class InSARStepwiseGRU(nn.Module):
 
     Predicts x_t from h_{t-1} at every time step, providing T supervision
     signals per pixel instead of 1.  Uses gated additive residual time-feature
-    fusion (the same pattern as the previous InSARGRU) applied before the GRU input.
+    fusion (gated additive residual: combined = src_embed + gate * time_embed) applied before the GRU input.
 
     In training mode (generate_mode=False) the shifted hidden states
     [h_0, h_1, ..., h_{T-1}] are decoded to predict [x_1, ..., x_T].
@@ -837,7 +837,7 @@ def run_training_and_prediction(config: TrainingConfig) -> Path:
 
     base_model = _build_model(config)
     model = base_model
-    if stepwise and config.use_zscore:
+    if config.use_zscore:
         criterion = _stepwise_nll
     else:
         criterion = _stepwise_mse
